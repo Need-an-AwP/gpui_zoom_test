@@ -1,12 +1,15 @@
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Context, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, ScrollDelta, ScrollEvent, Size, Style,
-    Window, WindowBounds, WindowOptions,
+    AnyElement, App, AvailableSpace, Bounds, Context, CursorStyle, Element, ElementId,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, Size, Style,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, point, px,
 };
+use gpui_fps::fps_monitor;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{blue, green, red, white};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 const MD_SAMPLE: &str = r#"# Markdown 示例
@@ -34,17 +37,21 @@ fn main() {
 const CARD_WIDTH: f32 = 380.0;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 1.0;
+const COLS: u16 = 10;
+const ROWS: u16 = 10;
 
 /// 固定尺寸排版绘制，paint 后通过 Scene 浮点缩放适配当前 zoom
 struct ScaledPaintZoom {
     zoom: f32,
+    pan: Point<Pixels>,
     child: AnyElement,
 }
 
 impl ScaledPaintZoom {
-    fn new(zoom: f32, child: impl IntoElement) -> Self {
+    fn new(zoom: f32, pan: Point<Pixels>, child: impl IntoElement) -> Self {
         Self {
             zoom: zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+            pan,
             child: child.into_any_element(),
         }
     }
@@ -101,9 +108,10 @@ impl Element for ScaledPaintZoom {
         cx: &mut App,
     ) -> Self::PrepaintState {
         // prepaint 的可见性裁剪也要在未缩放坐标系下进行，否则右/下部分会被剔除
+        let origin = bounds.origin + self.pan;
         let zoom = self.zoom;
-        window.with_scaled_content_mask(bounds.origin, zoom, |window| {
-            self.child.prepaint_at(bounds.origin, window, cx);
+        window.with_scaled_content_mask(origin, zoom, |window| {
+            self.child.prepaint_at(origin, window, cx);
         });
     }
 
@@ -117,7 +125,8 @@ impl Element for ScaledPaintZoom {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_scaled_paint(bounds.origin, self.zoom, |window| {
+        let origin = bounds.origin + self.pan;
+        window.with_scaled_paint(origin, self.zoom, |window| {
             self.child.paint(window, cx);
         });
     }
@@ -126,7 +135,7 @@ impl Element for ScaledPaintZoom {
 fn card_column(button_color: gpui::Hsla, child: impl IntoElement) -> impl IntoElement {
     div()
         .w(px(CARD_WIDTH))
-        .size_full()
+        .h_full()
         .flex()
         .flex_col()
         .gap_3()
@@ -138,29 +147,123 @@ fn card_column(button_color: gpui::Hsla, child: impl IntoElement) -> impl IntoEl
         .child(child)
 }
 
-struct HelloWorld {
-    zoom: f32,
-    /// true 为红色，false 为蓝色
-    button_red: bool,
-    note: Entity<TextareaState>,
-}
+fn markdown_card(
+    idx: usize,
+    button_color: gpui::Hsla,
+    cx: &mut Context<HelloWorld>,
+) -> impl IntoElement {
+    let button_style = ButtonCustomVariant::new(cx)
+        .color(button_color)
+        .foreground(white())
+        .hover(button_color)
+        .active(button_color);
 
-impl Render for HelloWorld {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let zoom = self.zoom;
-        let button_color = if self.button_red { red(500) } else { blue(500) };
-        let button_style = ButtonCustomVariant::new(cx)
-            .color(button_color)
-            .foreground(white())
-            .hover(button_color)
-            .active(button_color);
+    card_column(
+        button_color,
         div()
             .flex()
             .flex_col()
+            .gap_3()
+            .child(TextView::markdown(format!("md-demo-{}", idx), MD_SAMPLE))
+            .child(
+                Button::new(format!("color-toggle-{}", idx))
+                    .custom(button_style)
+                    .label("切换颜色")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.button_red = !this.button_red;
+                        cx.notify();
+                    })),
+            ),
+    )
+}
+
+fn textarea_card(button_color: gpui::Hsla, note: &Entity<TextareaState>) -> impl IntoElement {
+    card_column(
+        button_color,
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_h(px(260.))
+            .child(Textarea::new(note).h_full()),
+    )
+}
+
+fn example_grid_cards(
+    cols: u16,
+    rows: u16,
+    button_color: gpui::Hsla,
+    notes: &[Entity<TextareaState>],
+    cx: &mut Context<HelloWorld>,
+) -> impl IntoElement {
+    div()
+        .grid()
+        .grid_cols_min_content(cols)
+        .gap_6()
+        .children((0..cols * rows).map(|i| {
+            if i % 2 == 0 {
+                markdown_card(i.into(), button_color, cx).into_any_element()
+            } else {
+                textarea_card(button_color, &notes[(i / 2) as usize]).into_any_element()
+            }
+        }))
+}
+
+struct HelloWorld {
+    zoom: f32,
+    pan: Point<Pixels>,
+    drag_start: Option<(Point<Pixels>, Point<Pixels>)>,
+    /// true 为红色，false 为蓝色
+    button_red: bool,
+    notes: Vec<Entity<TextareaState>>,
+}
+
+impl Render for HelloWorld {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let zoom = self.zoom;
+        let pan = self.pan;
+        let is_dragging = self.drag_start.is_some();
+        let button_color = if self.button_red { red(500) } else { blue(500) };
+
+        div()
+            .relative()
             .size_full()
-            .items_center()
-            .justify_center()
+            .overflow_hidden()
             .bg(green(500).opacity(0.5))
+            .when(is_dragging, |this| this.cursor(CursorStyle::Crosshair))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.drag_start = Some((event.position, this.pan));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _event: &MouseUpEvent, _, cx| {
+                    this.drag_start = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(|this, _event: &MouseUpEvent, _, cx| {
+                    this.drag_start = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if let Some((start_pos, start_pan)) = this.drag_start {
+                    if event.pressed_button == Some(MouseButton::Middle) {
+                        this.pan = start_pan + (event.position - start_pos);
+                        cx.notify();
+                    } else {
+                        this.drag_start = None;
+                        cx.notify();
+                    }
+                }
+            }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 println!("scroll event: {:?}", event);
                 let delta_y = match event.delta {
@@ -177,39 +280,24 @@ impl Render for HelloWorld {
                 this.zoom = (this.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
                 cx.notify();
             }))
-            .child(ScaledPaintZoom::new(
-                zoom,
+            .child(
                 div()
-                    .grid()
-                    .grid_cols_min_content(2)
-                    .gap_6()
-                    .child(card_column(
-                        button_color,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(TextView::markdown("md-demo", MD_SAMPLE))
-                            .child(
-                                Button::new("color-toggle")
-                                    .custom(button_style)
-                                    .label("切换颜色")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.button_red = !this.button_red;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ))
-                    .child(card_column(
-                        button_color,
-                        div()
-                            .flex_1()
-                            .w(px(CARD_WIDTH / 2.))
-                            .flex()
-                            .flex_col()
-                            .child(Textarea::new(&self.note).h_full()),
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .child(ScaledPaintZoom::new(
+                        zoom,
+                        pan,
+                        example_grid_cards(COLS, ROWS, button_color, &self.notes, cx),
                     )),
-            ))
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .child(fps_monitor(window, cx)),
+            )
     }
 }
 
@@ -221,16 +309,29 @@ fn main() {
         open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("zoom test".into()),
+                    ..TitlebarOptions::default()
+                }),
                 ..Default::default()
             },
             cx,
             |window, cx| {
-                let note =
-                    cx.new(|cx| TextareaState::new(window, cx).placeholder("example textarea"));
+                let notes = (1..=ROWS * COLS)
+                    .map(|i| {
+                        cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .placeholder(format!("example textarea {}", i))
+                        })
+                    })
+                    .collect();
+
                 cx.new(|_| HelloWorld {
                     zoom: 1.0,
+                    pan: point(px(40.), px(40.)),
+                    drag_start: None,
                     button_red: true,
-                    note,
+                    notes,
                 })
             },
         )
