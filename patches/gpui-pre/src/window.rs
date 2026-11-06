@@ -844,20 +844,20 @@ pub struct Hitbox {
     /// Scaled-paint transforms (outermost first) active when the hitbox was inserted. `bounds`
     /// and `content_mask` live in the local (unscaled) space of these transforms, so window-space
     /// pointer positions are mapped through them before hit testing.
-    pub(crate) transform: Option<Rc<[(Point<Pixels>, f32)]>>,
+    pub(crate) transform: Option<Rc<[(Point<Pixels>, f32, Point<Pixels>)]>>,
 }
 
 /// Maps a window-space point into the local space of nested scaled-paint transforms
-/// (outermost first), inverting `p -> pivot + (p - pivot) * scale` for each.
+/// (outermost first), inverting `p -> pivot + (p - pivot) * scale + pan` for each.
 pub(crate) fn map_to_scaled_local(
-    transform: &[(Point<Pixels>, f32)],
+    transform: &[(Point<Pixels>, f32, Point<Pixels>)],
     mut position: Point<Pixels>,
 ) -> Point<Pixels> {
-    for (pivot, scale) in transform {
+    for (pivot, scale, pan) in transform {
         let inv = 1.0 / *scale;
         position = point(
-            pivot.x + (position.x - pivot.x) * inv,
-            pivot.y + (position.y - pivot.y) * inv,
+            pivot.x + (position.x - pan.x - pivot.x) * inv,
+            pivot.y + (position.y - pan.y - pivot.y) * inv,
         );
     }
     position
@@ -880,10 +880,10 @@ impl Hitbox {
     /// The inverse of [`Hitbox::window_to_local`].
     pub fn local_to_window(&self, position: Point<Pixels>) -> Point<Pixels> {
         match &self.transform {
-            Some(transform) => transform.iter().rev().fold(position, |p, (pivot, scale)| {
+            Some(transform) => transform.iter().rev().fold(position, |p, (pivot, scale, pan)| {
                 point(
-                    pivot.x + (p.x - pivot.x) * *scale,
-                    pivot.y + (p.y - pivot.y) * *scale,
+                    pivot.x + (p.x - pivot.x) * *scale + pan.x,
+                    pivot.y + (p.y - pivot.y) * *scale + pan.y,
                 )
             }),
             None => position,
@@ -1290,9 +1290,9 @@ pub struct Window {
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
-    /// Active scaled-paint transforms `(pivot, scale)`, outermost first. See
+    /// Active scaled-paint transforms `(pivot, scale, pan)`, outermost first. See
     /// [`Window::with_scaled_content_mask`].
-    pub(crate) scaled_transform_stack: Vec<(Point<Pixels>, f32)>,
+    pub(crate) scaled_transform_stack: Vec<(Point<Pixels>, f32, Point<Pixels>)>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
@@ -3451,9 +3451,10 @@ impl Window {
         &mut self,
         pivot: Point<Pixels>,
         scale: f32,
+        pan: Point<Pixels>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        if scale <= f32::EPSILON || (scale - 1.0).abs() <= f32::EPSILON {
+        if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
             return f(self);
         }
         let inv = 1.0 / scale;
@@ -3461,8 +3462,8 @@ impl Window {
         let expanded = ContentMask {
             bounds: Bounds::new(
                 point(
-                    pivot.x + (current.origin.x - pivot.x) * inv,
-                    pivot.y + (current.origin.y - pivot.y) * inv,
+                    pivot.x + (current.origin.x - pan.x - pivot.x) * inv,
+                    pivot.y + (current.origin.y - pan.y - pivot.y) * inv,
                 ),
                 size(current.size.width * inv, current.size.height * inv),
             ),
@@ -3472,7 +3473,7 @@ impl Window {
         self.content_mask_stack.push(expanded);
         // Hitboxes and mouse listeners created inside `f` map window-space pointer positions
         // back into this scaled subtree's local space.
-        self.scaled_transform_stack.push((pivot, scale));
+        self.scaled_transform_stack.push((pivot, scale, pan));
         let ret = f(self);
         self.scaled_transform_stack.pop();
         self.content_mask_stack.pop();
@@ -3480,7 +3481,7 @@ impl Window {
     }
 
     /// The scaled-paint transforms currently active, outermost first, if any.
-    fn current_scaled_transform(&self) -> Option<Rc<[(Point<Pixels>, f32)]>> {
+    fn current_scaled_transform(&self) -> Option<Rc<[(Point<Pixels>, f32, Point<Pixels>)]>> {
         if self.scaled_transform_stack.is_empty() {
             None
         } else {
@@ -3488,7 +3489,7 @@ impl Window {
         }
     }
 
-    /// Runs `f` during paint, then scales primitives recorded since the start around `pivot` by `scale`.
+    /// Runs `f` during paint, then scales primitives recorded since the start around `pivot` by `scale` and translates by `pan`.
     ///
     /// `content_mask` is a window-space clip (the viewport, intersected with ancestor overflow).
     /// [`Scene::scale_since`] scales those masks with the geometry, so the active mask is expanded
@@ -3499,17 +3500,19 @@ impl Window {
         &mut self,
         pivot: Point<Pixels>,
         scale: f32,
+        pan: Point<Pixels>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.invalidator.debug_assert_paint();
         let cp = self.next_frame.scene.checkpoint();
-        let ret = if scale <= f32::EPSILON || (scale - 1.0).abs() <= f32::EPSILON {
+        let ret = if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
             f(self)
         } else {
-            self.with_scaled_content_mask(pivot, scale, f)
+            self.with_scaled_content_mask(pivot, scale, pan, f)
         };
         let scaled_pivot = pivot.scale(self.scale_factor());
-        self.next_frame.scene.scale_since(cp, scaled_pivot, scale);
+        let scaled_pan = pan.scale(self.scale_factor());
+        self.next_frame.scene.scale_since(cp, scaled_pivot, scale, scaled_pan);
         ret
     }
 
@@ -3725,7 +3728,7 @@ impl Window {
     pub fn local_offset_to_window(&self, offset: Point<Pixels>) -> Point<Pixels> {
         self.scaled_transform_stack
             .iter()
-            .fold(offset, |offset, (_, scale)| offset * *scale)
+            .fold(offset, |offset, (_, scale, _)| offset * *scale)
     }
 
     /// Captures the pointer for the given hitbox. While captured, all mouse move and mouse up

@@ -205,17 +205,27 @@ pub struct SceneCheckpoint {
 }
 
 #[inline]
-fn scale_point(p: Point<ScaledPixels>, pivot: Point<ScaledPixels>, k: f32) -> Point<ScaledPixels> {
+fn scale_point(
+    p: Point<ScaledPixels>,
+    pivot: Point<ScaledPixels>,
+    k: f32,
+    offset: Point<ScaledPixels>,
+) -> Point<ScaledPixels> {
     Point {
-        x: ScaledPixels(pivot.x.0 + (p.x.0 - pivot.x.0) * k),
-        y: ScaledPixels(pivot.y.0 + (p.y.0 - pivot.y.0) * k),
+        x: ScaledPixels(pivot.x.0 + (p.x.0 - pivot.x.0) * k + offset.x.0),
+        y: ScaledPixels(pivot.y.0 + (p.y.0 - pivot.y.0) * k + offset.y.0),
     }
 }
 
 #[inline]
-fn scale_bounds(b: Bounds<ScaledPixels>, pivot: Point<ScaledPixels>, k: f32) -> Bounds<ScaledPixels> {
+fn scale_bounds(
+    b: Bounds<ScaledPixels>,
+    pivot: Point<ScaledPixels>,
+    k: f32,
+    offset: Point<ScaledPixels>,
+) -> Bounds<ScaledPixels> {
     Bounds {
-        origin: scale_point(b.origin, pivot, k),
+        origin: scale_point(b.origin, pivot, k, offset),
         size: Size {
             width: ScaledPixels(b.size.width.0 * k),
             height: ScaledPixels(b.size.height.0 * k),
@@ -237,53 +247,62 @@ impl Scene {
         }
     }
 
-    /// Scales all primitives appended after `cp`, around `pivot`, by factor `k`.
-    pub fn scale_since(&mut self, cp: SceneCheckpoint, pivot: Point<ScaledPixels>, k: f32) {
-        if (k - 1.0).abs() <= f32::EPSILON {
+    /// Scales all primitives appended after `cp`, around `pivot`, by factor `k`, and translates by `offset`.
+    pub fn scale_since(
+        &mut self,
+        cp: SceneCheckpoint,
+        pivot: Point<ScaledPixels>,
+        k: f32,
+        offset: Point<ScaledPixels>,
+    ) {
+        if (k - 1.0).abs() <= f32::EPSILON
+            && offset.x.0.abs() <= f32::EPSILON
+            && offset.y.0.abs() <= f32::EPSILON
+        {
             return;
         }
         for q in &mut self.quads[cp.quads..] {
-            q.bounds = scale_bounds(q.bounds, pivot, k);
-            q.content_mask.bounds = scale_bounds(q.content_mask.bounds, pivot, k);
+            q.bounds = scale_bounds(q.bounds, pivot, k, offset);
+            q.content_mask.bounds = scale_bounds(q.content_mask.bounds, pivot, k, offset);
             q.corner_radii = q.corner_radii.map(|r| ScaledPixels(r.0 * k));
             q.border_widths = q.border_widths.map(|w| ScaledPixels(w.0 * k));
         }
         for s in &mut self.shadows[cp.shadows..] {
-            s.bounds = scale_bounds(s.bounds, pivot, k);
-            s.content_mask.bounds = scale_bounds(s.content_mask.bounds, pivot, k);
+            s.bounds = scale_bounds(s.bounds, pivot, k, offset);
+            s.content_mask.bounds = scale_bounds(s.content_mask.bounds, pivot, k, offset);
             s.corner_radii = s.corner_radii.map(|r| ScaledPixels(r.0 * k));
-            s.element_bounds = scale_bounds(s.element_bounds, pivot, k);
+            s.element_bounds = scale_bounds(s.element_bounds, pivot, k, offset);
             s.element_corner_radii = s.element_corner_radii.map(|r| ScaledPixels(r.0 * k));
             s.blur_radius = ScaledPixels(s.blur_radius.0 * k);
         }
         for m in &mut self.monochrome_sprites[cp.monochrome_sprites..] {
-            m.bounds = scale_bounds(m.bounds, pivot, k);
-            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k);
+            m.bounds = scale_bounds(m.bounds, pivot, k, offset);
+            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k, offset);
         }
         for m in &mut self.subpixel_sprites[cp.subpixel_sprites..] {
-            m.bounds = scale_bounds(m.bounds, pivot, k);
-            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k);
+            m.bounds = scale_bounds(m.bounds, pivot, k, offset);
+            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k, offset);
         }
         for p in &mut self.polychrome_sprites[cp.polychrome_sprites..] {
-            p.bounds = scale_bounds(p.bounds, pivot, k);
-            p.content_mask.bounds = scale_bounds(p.content_mask.bounds, pivot, k);
+            p.bounds = scale_bounds(p.bounds, pivot, k, offset);
+            p.content_mask.bounds = scale_bounds(p.content_mask.bounds, pivot, k, offset);
             p.corner_radii = p.corner_radii.map(|r| ScaledPixels(r.0 * k));
         }
         for u in &mut self.underlines[cp.underlines..] {
-            u.bounds = scale_bounds(u.bounds, pivot, k);
-            u.content_mask.bounds = scale_bounds(u.content_mask.bounds, pivot, k);
+            u.bounds = scale_bounds(u.bounds, pivot, k, offset);
+            u.content_mask.bounds = scale_bounds(u.content_mask.bounds, pivot, k, offset);
             u.thickness = ScaledPixels(u.thickness.0 * k);
         }
         for path in &mut self.paths[cp.paths..] {
-            path.bounds = scale_bounds(path.bounds, pivot, k);
-            path.content_mask.bounds = scale_bounds(path.content_mask.bounds, pivot, k);
+            path.bounds = scale_bounds(path.bounds, pivot, k, offset);
+            path.content_mask.bounds = scale_bounds(path.content_mask.bounds, pivot, k, offset);
             for v in &mut path.vertices {
-                v.xy_position = scale_point(v.xy_position, pivot, k);
+                v.xy_position = scale_point(v.xy_position, pivot, k, offset);
             }
         }
         for surface in &mut self.surfaces[cp.surfaces..] {
-            surface.bounds = scale_bounds(surface.bounds, pivot, k);
-            surface.content_mask.bounds = scale_bounds(surface.content_mask.bounds, pivot, k);
+            surface.bounds = scale_bounds(surface.bounds, pivot, k, offset);
+            surface.content_mask.bounds = scale_bounds(surface.content_mask.bounds, pivot, k, offset);
         }
     }
 }

@@ -108,10 +108,10 @@ impl Element for ScaledPaintZoom {
         cx: &mut App,
     ) -> Self::PrepaintState {
         // prepaint 的可见性裁剪也要在未缩放坐标系下进行，否则右/下部分会被剔除
-        let origin = bounds.origin + self.pan;
         let zoom = self.zoom;
-        window.with_scaled_content_mask(origin, zoom, |window| {
-            self.child.prepaint_at(origin, window, cx);
+        let pan = self.pan;
+        window.with_scaled_content_mask(bounds.origin, zoom, pan, |window| {
+            self.child.prepaint_at(bounds.origin, window, cx);
         });
     }
 
@@ -125,8 +125,7 @@ impl Element for ScaledPaintZoom {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let origin = bounds.origin + self.pan;
-        window.with_scaled_paint(origin, self.zoom, |window| {
+        window.with_scaled_paint(bounds.origin, self.zoom, self.pan, |window| {
             self.child.paint(window, cx);
         });
     }
@@ -150,7 +149,7 @@ fn card_column(button_color: gpui::Hsla, child: impl IntoElement) -> impl IntoEl
 fn markdown_card(
     idx: usize,
     button_color: gpui::Hsla,
-    cx: &mut Context<HelloWorld>,
+    cx: &mut Context<CardsCanvas>,
 ) -> impl IntoElement {
     let button_style = ButtonCustomVariant::new(cx)
         .color(button_color)
@@ -190,33 +189,42 @@ fn textarea_card(button_color: gpui::Hsla, note: &Entity<TextareaState>) -> impl
     )
 }
 
-fn example_grid_cards(
-    cols: u16,
-    rows: u16,
-    button_color: gpui::Hsla,
-    notes: &[Entity<TextareaState>],
-    cx: &mut Context<HelloWorld>,
-) -> impl IntoElement {
-    div()
-        .grid()
-        .grid_cols_min_content(cols)
-        .gap_6()
-        .children((0..cols * rows).map(|i| {
-            if i % 2 == 0 {
-                markdown_card(i.into(), button_color, cx).into_any_element()
-            } else {
-                textarea_card(button_color, &notes[(i / 2) as usize]).into_any_element()
-            }
-        }))
+struct CardsCanvas {
+    button_red: bool,
+    notes: Vec<Entity<TextareaState>>,
+}
+
+impl CardsCanvas {
+    fn new(notes: Vec<Entity<TextareaState>>) -> Self {
+        Self {
+            button_red: true,
+            notes,
+        }
+    }
+}
+
+impl Render for CardsCanvas {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let button_color = if self.button_red { red(500) } else { blue(500) };
+        div()
+            .grid()
+            .grid_cols_min_content(COLS)
+            .gap_6()
+            .children((0..COLS * ROWS).map(|i| {
+                if i % 2 == 0 {
+                    markdown_card(i.into(), button_color, cx).into_any_element()
+                } else {
+                    textarea_card(button_color, &self.notes[(i / 2) as usize]).into_any_element()
+                }
+            }))
+    }
 }
 
 struct HelloWorld {
     zoom: f32,
     pan: Point<Pixels>,
     drag_start: Option<(Point<Pixels>, Point<Pixels>)>,
-    /// true 为红色，false 为蓝色
-    button_red: bool,
-    notes: Vec<Entity<TextareaState>>,
+    cards: Entity<CardsCanvas>,
 }
 
 impl Render for HelloWorld {
@@ -224,7 +232,6 @@ impl Render for HelloWorld {
         let zoom = self.zoom;
         let pan = self.pan;
         let is_dragging = self.drag_start.is_some();
-        let button_color = if self.button_red { red(500) } else { blue(500) };
 
         div()
             .relative()
@@ -256,8 +263,11 @@ impl Render for HelloWorld {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if let Some((start_pos, start_pan)) = this.drag_start {
                     if event.pressed_button == Some(MouseButton::Middle) {
-                        this.pan = start_pan + (event.position - start_pos);
-                        cx.notify();
+                        let new_pan = start_pan + (event.position - start_pos);
+                        if this.pan != new_pan {
+                            this.pan = new_pan;
+                            cx.notify();
+                        }
                     } else {
                         this.drag_start = None;
                         cx.notify();
@@ -288,7 +298,7 @@ impl Render for HelloWorld {
                     .child(ScaledPaintZoom::new(
                         zoom,
                         pan,
-                        example_grid_cards(COLS, ROWS, button_color, &self.notes, cx),
+                        self.cards.clone(),
                     )),
             )
             .child(
@@ -326,12 +336,13 @@ fn main() {
                     })
                     .collect();
 
+                let cards = cx.new(|_| CardsCanvas::new(notes));
+
                 cx.new(|_| HelloWorld {
                     zoom: 1.0,
                     pan: point(px(40.), px(40.)),
                     drag_start: None,
-                    button_red: true,
-                    notes,
+                    cards,
                 })
             },
         )
