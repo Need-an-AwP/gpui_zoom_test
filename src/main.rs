@@ -4,6 +4,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions,
 };
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{blue, green, red, white};
 use gpui_kit::*;
@@ -76,10 +77,7 @@ impl Element for ScaledPaintZoom {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let ref_size = self.child.layout_as_root(
-            size(
-                AvailableSpace::Definite(px(CARD_WIDTH)),
-                AvailableSpace::MinContent,
-            ),
+            size(AvailableSpace::MinContent, AvailableSpace::MinContent),
             window,
             cx,
         );
@@ -125,10 +123,26 @@ impl Element for ScaledPaintZoom {
     }
 }
 
+fn card_column(button_color: gpui::Hsla, child: impl IntoElement) -> impl IntoElement {
+    div()
+        .w(px(CARD_WIDTH))
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_4()
+        .rounded_md()
+        .bg(button_color.opacity(0.5))
+        .border_5()
+        .border_color(red(500))
+        .child(child)
+}
+
 struct HelloWorld {
     zoom: f32,
     /// true 为红色，false 为蓝色
     button_red: bool,
+    note: Entity<TextareaState>,
 }
 
 impl Render for HelloWorld {
@@ -166,25 +180,35 @@ impl Render for HelloWorld {
             .child(ScaledPaintZoom::new(
                 zoom,
                 div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_4()
-                    .rounded(rems(0.5))
-                    .bg(if self.button_red { red(500) } else { blue(500) }.opacity(0.5))
-                    .border_5()
-                    .border_color(red(500))
-                    .child(TextView::markdown("md-demo", MD_SAMPLE))
-                    .child(
-                        Button::new("color-toggle")
-                            .custom(button_style)
-                            .label("切换颜色")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.button_red = !this.button_red;
-                                cx.notify();
-                            })),
-                    ),
+                    .grid()
+                    .grid_cols_min_content(2)
+                    .gap_6()
+                    .child(card_column(
+                        button_color,
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(TextView::markdown("md-demo", MD_SAMPLE))
+                            .child(
+                                Button::new("color-toggle")
+                                    .custom(button_style)
+                                    .label("切换颜色")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.button_red = !this.button_red;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ))
+                    .child(card_column(
+                        button_color,
+                        div()
+                            .flex_1()
+                            .w(px(CARD_WIDTH / 2.))
+                            .flex()
+                            .flex_col()
+                            .child(Textarea::new(&self.note).h_full()),
+                    )),
             ))
     }
 }
@@ -193,17 +217,20 @@ fn main() {
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
 
-        let bounds = Bounds::centered(None, size(px(500.), px(600.)), cx);
+        let bounds = Bounds::centered(None, size(px(900.), px(650.)), cx);
         open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
             cx,
-            |_, cx| {
+            |window, cx| {
+                let note =
+                    cx.new(|cx| TextareaState::new(window, cx).placeholder("example textarea"));
                 cx.new(|_| HelloWorld {
                     zoom: 1.0,
                     button_red: true,
+                    note,
                 })
             },
         )
