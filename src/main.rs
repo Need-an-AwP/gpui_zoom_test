@@ -310,7 +310,18 @@ impl Render for HelloWorld {
                     } // 24px line height
                 };
                 let factor = (1.0 + delta_y * 0.002).clamp(0.8, 1.25); // 每 1px 垂直增量 ≈ 0.2% 的乘性缩放（0.002）
-                this.zoom = (this.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                let k0 = this.zoom;
+                let k1 = (k0 * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                if k1 != k0 {
+                    // 枢轴是画布左上角。把光标下的内容点在新缩放下送回光标。
+                    let cursor = event.position;
+                    let local = point(
+                        (cursor.x - this.pan.x) / k0,
+                        (cursor.y - this.pan.y) / k0,
+                    );
+                    this.pan = point(cursor.x - local.x * k1, cursor.y - local.y * k1);
+                    this.zoom = k1;
+                }
                 cx.notify();
             }))
             .child(
