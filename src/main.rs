@@ -44,14 +44,16 @@ const ROWS: u16 = 10;
 struct ScaledPaintZoom {
     zoom: f32,
     pan: Point<Pixels>,
+    ref_size: Size<Pixels>,
     child: AnyElement,
 }
 
 impl ScaledPaintZoom {
-    fn new(zoom: f32, pan: Point<Pixels>, child: impl IntoElement) -> Self {
+    fn new(zoom: f32, pan: Point<Pixels>, ref_size: Size<Pixels>, child: impl IntoElement) -> Self {
         Self {
             zoom: zoom.clamp(MIN_ZOOM, MAX_ZOOM),
             pan,
+            ref_size,
             child: child.into_any_element(),
         }
     }
@@ -83,12 +85,18 @@ impl Element for ScaledPaintZoom {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let ref_size = self.child.layout_as_root(
-            size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+        let ref_size = self.ref_size;
+        // DO NOT REQUEST LAYOUT WITH MINCONTENT EVERY FRAME
+        self.child.layout_as_root(
+            size(
+                AvailableSpace::Definite(ref_size.width),
+                AvailableSpace::Definite(ref_size.height),
+            ),
             window,
             cx,
         );
 
+        // println!("ref_size: {:?}", ref_size);
         let k = self.zoom;
         let mut style = Style::default();
         style.size.width = px(ref_size.width.as_f32() * k).into();
@@ -110,6 +118,9 @@ impl Element for ScaledPaintZoom {
         // prepaint 的可见性裁剪也要在未缩放坐标系下进行，否则右/下部分会被剔除
         let zoom = self.zoom;
         let pan = self.pan;
+        let ref_size = self.ref_size;
+
+        // println!("pan: {:?}", pan);
         window.with_scaled_content_mask(bounds.origin, zoom, pan, |window| {
             self.child.prepaint_at(bounds.origin, window, cx);
         });
@@ -126,7 +137,9 @@ impl Element for ScaledPaintZoom {
         cx: &mut App,
     ) {
         window.with_scaled_paint(bounds.origin, self.zoom, self.pan, |window| {
-            self.child.paint(window, cx);
+            window.paint_layer(bounds, |window| {
+                self.child.paint(window, cx);
+            })
         });
     }
 }
@@ -211,11 +224,12 @@ impl Render for CardsCanvas {
             .grid_cols_min_content(COLS)
             .gap_6()
             .children((0..COLS * ROWS).map(|i| {
-                if i % 2 == 0 {
-                    markdown_card(i.into(), button_color, cx).into_any_element()
-                } else {
-                    textarea_card(button_color, &self.notes[(i / 2) as usize]).into_any_element()
-                }
+                // if i % 2 == 0 {
+                //     markdown_card(i.into(), button_color, cx).into_any_element()
+                // } else {
+                //     textarea_card(button_color, &self.notes[(i / 2) as usize]).into_any_element()
+                // }
+                markdown_card(i.into(), button_color, cx).into_any_element()
             }))
     }
 }
@@ -232,6 +246,15 @@ impl Render for HelloWorld {
         let zoom = self.zoom;
         let pan = self.pan;
         let is_dragging = self.drag_start.is_some();
+
+        let ref_size: Size<Pixels> = Size {
+            width: px(4016.0),
+            height: px(5986.0),
+        };
+        let mut card_style = StyleRefinement::default();
+        card_style.size.width = Some(ref_size.width.into());
+        card_style.size.height = Some(ref_size.height.into());
+        let cached_cards = self.cards.clone().cached(card_style);
 
         div()
             .relative()
@@ -295,11 +318,7 @@ impl Render for HelloWorld {
                     .absolute()
                     .top_0()
                     .left_0()
-                    .child(ScaledPaintZoom::new(
-                        zoom,
-                        pan,
-                        self.cards.clone(),
-                    )),
+                    .child(ScaledPaintZoom::new(zoom, pan, ref_size, cached_cards)),
             )
             .child(
                 div()

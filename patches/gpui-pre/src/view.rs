@@ -563,6 +563,12 @@ fn prepaint_view(
                     element_state.prepaint_range = prepaint_start..prepaint_end;
 
                     return (None, element_state);
+                } else {
+                    println!(
+                        "CACHE MISS! dirty={}, refreshing={}",
+                        window.dirty_views.contains(&entity_id),
+                        window.refreshing,
+                    );
                 }
 
                 let refreshing = mem::replace(&mut window.refreshing, true);

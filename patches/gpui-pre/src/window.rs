@@ -3454,20 +3454,29 @@ impl Window {
         pan: Point<Pixels>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
-            return f(self);
-        }
+        // TEST: ALWAYS USE FIXED MASK SIZE
+        // if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
+        //     return f(self);
+        // }
         let inv = 1.0 / scale;
         let current = self.content_mask().bounds;
+        // TEST MASK SIZE
+        let ref_size: Size<Pixels> = Size {
+            width: px(4016.0),
+            height: px(5986.0),
+        };
         let expanded = ContentMask {
             bounds: Bounds::new(
                 point(
-                    pivot.x + (current.origin.x - pan.x - pivot.x) * inv,
-                    pivot.y + (current.origin.y - pan.y - pivot.y) * inv,
+                    pivot.x + (current.origin.x /*- pan.x*/ - pivot.x) * inv,
+                    pivot.y + (current.origin.y /*- pan.y*/ - pivot.y) * inv,
                 ),
-                size(current.size.width * inv, current.size.height * inv),
+                // size(current.size.width * inv, current.size.height * inv),
+                size(ref_size.width, ref_size.height),
             ),
         };
+        // println!("bounds: {:?}", expanded.bounds);
+
         // Push directly. `with_content_mask` intersects with the current mask and
         // would clamp this expansion back down to the viewport.
         self.content_mask_stack.push(expanded);
@@ -3505,14 +3514,22 @@ impl Window {
     ) -> R {
         self.invalidator.debug_assert_paint();
         let cp = self.next_frame.scene.checkpoint();
-        let ret = if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
-            f(self)
-        } else {
-            self.with_scaled_content_mask(pivot, scale, pan, f)
-        };
+        let t0 = std::time::Instant::now();
+        let ret = self.with_scaled_content_mask(pivot, scale, pan, f);
+        let t_inner = t0.elapsed();
         let scaled_pivot = pivot.scale(self.scale_factor());
         let scaled_pan = pan.scale(self.scale_factor());
+        let t1 = std::time::Instant::now();
         self.next_frame.scene.scale_since(cp, scaled_pivot, scale, scaled_pan);
+        let t_scale = t1.elapsed();
+        println!(
+            "[PERF] with_scaled_paint: inner(replay)={:?}, scale_since={:?}, quads={}, mono={}, subpx={}",
+            t_inner,
+            t_scale,
+            self.next_frame.scene.quads.len() - cp.quads,
+            self.next_frame.scene.monochrome_sprites.len() - cp.monochrome_sprites,
+            self.next_frame.scene.subpixel_sprites.len() - cp.subpixel_sprites
+        );
         ret
     }
 
@@ -3827,8 +3844,12 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        let t_start = std::time::Instant::now();
+        let mut t_draw_roots = std::time::Duration::ZERO;
         if !cx.mode.skip_drawing() {
+            let t0 = std::time::Instant::now();
             self.draw_roots(cx);
+            t_draw_roots = t0.elapsed();
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -3874,7 +3895,9 @@ impl Window {
 
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
+        let t_finish_start = std::time::Instant::now();
         self.next_frame.finish(&mut self.rendered_frame);
+        let t_finish = t_finish_start.elapsed();
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -3942,6 +3965,11 @@ impl Window {
             self.debug_frame_overlay.record_frame(draw_duration);
         }
 
+        let t_total = t_start.elapsed();
+        println!(
+            "[PERF] Window::draw total={:?} (roots={:?}, finish={:?})",
+            t_total, t_draw_roots, t_finish
+        );
         // Exit the scope to obtain the arena-clear token this draw owes; the
         // scope's teardown itself happens in `ElementArenaScope::drop`.
         arena_scope.exit(&cx.element_arena)
@@ -3975,7 +4003,10 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
+        let t0 = std::time::Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        let t_draw = t0.elapsed();
+        println!("[PERF] present(DirectX)={:?}", t_draw);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
