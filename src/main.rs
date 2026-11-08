@@ -5,8 +5,9 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowOptions, point, px,
 };
 use gpui_fps::fps_monitor;
+use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{blue, green, red, white};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -137,7 +138,10 @@ impl Element for ScaledPaintZoom {
         cx: &mut App,
     ) {
         window.with_scaled_paint(bounds.origin, self.zoom, self.pan, |window| {
-            window.paint_layer(bounds, |window| {
+            // TEST FIXED BOUNDS
+            // bounds parameter in this `paint` is from `window.layout_bounds`, which can be dynamic, and cause z-index problems
+            let unscaled_bounds = Bounds::new(bounds.origin, self.ref_size);
+            window.paint_layer(unscaled_bounds, |window| {
                 self.child.paint(window, cx);
             })
         });
@@ -234,18 +238,139 @@ impl Render for CardsCanvas {
     }
 }
 
-struct HelloWorld {
+/// 画布左上角为枢轴：屏幕点 = 内容点 × zoom + pan
+struct Camera {
     zoom: f32,
     pan: Point<Pixels>,
+}
+
+impl Camera {
+    fn new(zoom: f32, pan: Point<Pixels>) -> Self {
+        Self {
+            zoom: zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+            pan,
+        }
+    }
+
+    fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    fn pan(&self) -> Point<Pixels> {
+        self.pan
+    }
+
+    /// 缩放到 `zoom`，`anchor` 屏幕点下的内容保持不动。
+    fn zoom_to(&mut self, zoom: f32, anchor: Point<Pixels>) {
+        let k0 = self.zoom;
+        let k1 = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if k1 == k0 {
+            return;
+        }
+        let local = point((anchor.x - self.pan.x) / k0, (anchor.y - self.pan.y) / k0);
+        self.pan = point(anchor.x - local.x * k1, anchor.y - local.y * k1);
+        self.zoom = k1;
+    }
+
+    fn pan_to(&mut self, pan: Point<Pixels>) {
+        self.pan = pan;
+    }
+}
+
+struct HelloWorld {
+    camera: Camera,
     drag_start: Option<(Point<Pixels>, Point<Pixels>)>,
     cards: Entity<CardsCanvas>,
+    hud_x: Entity<InputState>,
+    hud_y: Entity<InputState>,
+    hud_zoom: Entity<InputState>,
+}
+
+fn sync_hud_input(input: &Entity<InputState>, value: String, window: &mut Window, cx: &mut App) {
+    input.update(cx, |state, cx| {
+        if state.text().to_string() != value {
+            state.set_value(value, window, cx);
+        }
+    });
+}
+
+impl HelloWorld {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cards: Entity<CardsCanvas>,
+        initial_pan: Point<Pixels>,
+    ) -> Self {
+        Self {
+            camera: Camera::new(1.0, initial_pan),
+            drag_start: None,
+            cards,
+            hud_x: cx.new(|cx| InputState::new(window, cx).default_value("0")),
+            hud_y: cx.new(|cx| InputState::new(window, cx).default_value("0")),
+            hud_zoom: cx.new(|cx| InputState::new(window, cx).default_value("1")),
+        }
+    }
+
+    fn camera_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let field_bg = hsla(0., 0., 1., 0.08);
+        let hud_fg = hsla(0., 0., 0.98, 1.);
+        let hud_muted = hsla(0., 0., 0.62, 1.);
+        let field = move |label: &'static str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(div().w(px(40.)).text_color(hud_muted).child(label))
+                .child(
+                    Input::new(input)
+                        .small()
+                        .readonly(true)
+                        .appearance(false)
+                        .h(px(22.))
+                        .w(px(88.))
+                        .px_1()
+                        .rounded(px(3.))
+                        .bg(field_bg)
+                        .text_size(px(10.))
+                        .text_color(hud_fg),
+                )
+        };
+        div()
+            .absolute()
+            .top(px(12.))
+            .left(px(12.))
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(168.))
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded(px(4.))
+            .bg(hsla(0., 0., 0.04, 0.92))
+            .font_family("Consolas")
+            .text_size(px(10.))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| cx.stop_propagation()))
+            .child(field("X", &self.hud_x))
+            .child(field("Y", &self.hud_y))
+            .child(field("ZOOM", &self.hud_zoom))
+    }
 }
 
 impl Render for HelloWorld {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let zoom = self.zoom;
-        let pan = self.pan;
+        let zoom = self.camera.zoom();
+        let pan = self.camera.pan();
         let is_dragging = self.drag_start.is_some();
+
+        sync_hud_input(&self.hud_x, format!("{:.1}", pan.x.as_f32()), window, cx);
+        sync_hud_input(&self.hud_y, format!("{:.1}", pan.y.as_f32()), window, cx);
+        sync_hud_input(&self.hud_zoom, format!("{:.3}", zoom), window, cx);
 
         let ref_size: Size<Pixels> = Size {
             width: px(4016.0),
@@ -265,7 +390,7 @@ impl Render for HelloWorld {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    this.drag_start = Some((event.position, this.pan));
+                    this.drag_start = Some((event.position, this.camera.pan()));
                     cx.notify();
                 }),
             )
@@ -287,8 +412,8 @@ impl Render for HelloWorld {
                 if let Some((start_pos, start_pan)) = this.drag_start {
                     if event.pressed_button == Some(MouseButton::Middle) {
                         let new_pan = start_pan + (event.position - start_pos);
-                        if this.pan != new_pan {
-                            this.pan = new_pan;
+                        if this.camera.pan() != new_pan {
+                            this.camera.pan_to(new_pan);
                             cx.notify();
                         }
                     } else {
@@ -305,23 +430,13 @@ impl Render for HelloWorld {
                         if event.modifiers.control {
                             l.y * 24.0
                         } else {
-                            l.y / 10.0 * 24.0 // 10x slower if hold ctrl
+                            l.y / 10.0 * 24.0 // 10x faster if hold ctrl
                         }
                     } // 24px line height
                 };
                 let factor = (1.0 + delta_y * 0.002).clamp(0.8, 1.25); // 每 1px 垂直增量 ≈ 0.2% 的乘性缩放（0.002）
-                let k0 = this.zoom;
-                let k1 = (k0 * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-                if k1 != k0 {
-                    // 枢轴是画布左上角。把光标下的内容点在新缩放下送回光标。
-                    let cursor = event.position;
-                    let local = point(
-                        (cursor.x - this.pan.x) / k0,
-                        (cursor.y - this.pan.y) / k0,
-                    );
-                    this.pan = point(cursor.x - local.x * k1, cursor.y - local.y * k1);
-                    this.zoom = k1;
-                }
+                let k1 = this.camera.zoom() * factor;
+                this.camera.zoom_to(k1, event.position);
                 cx.notify();
             }))
             .child(
@@ -338,6 +453,7 @@ impl Render for HelloWorld {
                     .right_0()
                     .child(fps_monitor(window, cx)),
             )
+            .child(self.camera_hud(cx))
     }
 }
 
@@ -368,12 +484,11 @@ fn main() {
 
                 let cards = cx.new(|_| CardsCanvas::new(notes));
 
-                cx.new(|_| HelloWorld {
-                    zoom: 1.0,
-                    pan: point(px(40.), px(40.)),
-                    drag_start: None,
-                    cards,
-                })
+                let initial_pan = point(
+                    px((bounds.size.width / 2.).as_f32()),
+                    px((bounds.size.height / 2.).as_f32()),
+                );
+                cx.new(|cx| HelloWorld::new(window, cx, cards, initial_pan))
             },
         )
         .expect("Failed to open window");
