@@ -18,7 +18,8 @@ use crate::{
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, SceneCheckpoint, Shadow,
+    SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
@@ -1117,7 +1118,8 @@ pub(crate) struct PrepaintStateIndex {
 
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
-    scene_index: usize,
+    primitives: SceneCheckpoint,
+    layers: usize,
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
@@ -4446,7 +4448,8 @@ impl Window {
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
-            scene_index: self.next_frame.scene.len(),
+            primitives: self.next_frame.scene.replay_checkpoint(),
+            layers: self.next_frame.scene.replay_layer_len(),
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
@@ -4459,6 +4462,7 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        let t0 = std::time::Instant::now();
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4479,12 +4483,16 @@ impl Window {
                 .iter_mut()
                 .map(|handler| handler.take()),
         );
+        let t_listeners_start = std::time::Instant::now();
+        let mouse_count = range.end.mouse_listeners_index - range.start.mouse_listeners_index;
         self.next_frame.mouse_listeners.extend(
             self.rendered_frame.mouse_listeners
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
+        let t_listeners = t_listeners_start.elapsed();
+
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
                 ..range.end.accessed_element_states_index]
@@ -4496,11 +4504,26 @@ impl Window {
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
 
+        let t_text_start = std::time::Instant::now();
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
-            range.start.scene_index..range.end.scene_index,
+        let t_text = t_text_start.elapsed();
+
+        let t_scene_start = std::time::Instant::now();
+        self.next_frame.scene.replay_cached(
             &self.rendered_frame.scene,
+            range.start.primitives..range.end.primitives,
+            range.start.layers..range.end.layers,
+        );
+        let t_scene = t_scene_start.elapsed();
+
+        println!(
+            "  [REUSE_PAINT] total={:?}, listeners({} items)={:?}, text_layouts={:?}, scene_replay={:?}",
+            t0.elapsed(),
+            mouse_count,
+            t_listeners,
+            t_text,
+            t_scene
         );
     }
 

@@ -36,6 +36,48 @@ impl From<bool> for PaddedBool32 {
     }
 }
 
+/// Layer markers only. Primitive payloads live in [`PrimitiveReplay`], so cache
+/// replay can rebuild draw order without walking every glyph.
+#[derive(Clone, Copy, Debug)]
+enum LayerLogOp {
+    Start(Bounds<ScaledPixels>),
+    End,
+}
+
+/// Insertion-ordered primitives as they were recorded, before `scale_since` or `finish`.
+#[derive(Default)]
+struct PrimitiveReplay {
+    shadows: Vec<Shadow>,
+    quads: Vec<Quad>,
+    paths: Vec<Path<ScaledPixels>>,
+    underlines: Vec<Underline>,
+    monochrome_sprites: Vec<MonochromeSprite>,
+    subpixel_sprites: Vec<SubpixelSprite>,
+    polychrome_sprites: Vec<PolychromeSprite>,
+    surfaces: Vec<PaintSurface>,
+}
+
+impl PrimitiveReplay {
+    fn clear(&mut self) {
+        self.shadows.clear();
+        self.quads.clear();
+        self.paths.clear();
+        self.underlines.clear();
+        self.monochrome_sprites.clear();
+        self.subpixel_sprites.clear();
+        self.polychrome_sprites.clear();
+        self.surfaces.clear();
+    }
+}
+
+fn extend_log_and_render<T: Clone>(render: &mut Vec<T>, log: &mut Vec<T>, src: &[T]) {
+    if src.is_empty() {
+        return;
+    }
+    render.extend_from_slice(src);
+    log.extend_from_slice(src);
+}
+
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
@@ -50,6 +92,8 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    primitive_log: PrimitiveReplay,
+    layer_log: Vec<LayerLogOp>,
 }
 
 #[expect(missing_docs)]
@@ -66,6 +110,8 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.primitive_log.clear();
+        self.layer_log.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -77,11 +123,13 @@ impl Scene {
         self.layer_stack.push(order);
         self.paint_operations
             .push(PaintOperation::StartLayer(bounds));
+        self.layer_log.push(LayerLogOp::Start(bounds));
     }
 
     pub fn pop_layer(&mut self) {
         self.layer_stack.pop();
         self.paint_operations.push(PaintOperation::EndLayer);
+        self.layer_log.push(LayerLogOp::End);
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
@@ -103,35 +151,43 @@ impl Scene {
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
                 self.shadows.push(*shadow);
+                self.primitive_log.shadows.push(*shadow);
             }
             Primitive::Quad(quad) => {
                 quad.order = order;
                 self.quads.push(*quad);
+                self.primitive_log.quads.push(*quad);
             }
             Primitive::Path(path) => {
                 path.order = order;
                 path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
+                self.primitive_log.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
                 underline.order = order;
                 self.underlines.push(*underline);
+                self.primitive_log.underlines.push(*underline);
             }
             Primitive::MonochromeSprite(sprite) => {
                 sprite.order = order;
                 self.monochrome_sprites.push(*sprite);
+                self.primitive_log.monochrome_sprites.push(*sprite);
             }
             Primitive::SubpixelSprite(sprite) => {
                 sprite.order = order;
                 self.subpixel_sprites.push(*sprite);
+                self.primitive_log.subpixel_sprites.push(*sprite);
             }
             Primitive::PolychromeSprite(sprite) => {
                 sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
+                self.primitive_log.polychrome_sprites.push(*sprite);
             }
             Primitive::Surface(surface) => {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
+                self.primitive_log.surfaces.push(surface.clone());
             }
         }
         self.paint_operations
@@ -146,6 +202,117 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
+    }
+
+    /// Length of [`Self::layer_log`]. Cache ranges index this, not the render lists.
+    pub(crate) fn replay_layer_len(&self) -> usize {
+        self.layer_log.len()
+    }
+
+    /// Pre-scale primitive counts. Safe to store across `scale_since` and `finish`.
+    pub(crate) fn replay_checkpoint(&self) -> SceneCheckpoint {
+        let log = &self.primitive_log;
+        SceneCheckpoint {
+            shadows: log.shadows.len(),
+            quads: log.quads.len(),
+            paths: log.paths.len(),
+            underlines: log.underlines.len(),
+            monochrome_sprites: log.monochrome_sprites.len(),
+            subpixel_sprites: log.subpixel_sprites.len(),
+            polychrome_sprites: log.polychrome_sprites.len(),
+            surfaces: log.surfaces.len(),
+        }
+    }
+
+    /// Rebuild a cached subtree from the previous frame's replay log.
+    ///
+    /// Layer markers are replayed so later geometry still overlaps the same draw
+    /// orders. Primitive payloads are appended with `extend_from_slice` and keep
+    /// the orders assigned when they were first painted. `scale_since` then scales
+    /// only the render lists.
+    pub(crate) fn replay_cached(
+        &mut self,
+        prev_scene: &Scene,
+        primitives: Range<SceneCheckpoint>,
+        layers: Range<usize>,
+    ) {
+        let t0 = std::time::Instant::now();
+        let layer_depth = self.layer_stack.len();
+        for op in &prev_scene.layer_log[layers] {
+            match *op {
+                LayerLogOp::Start(bounds) => self.push_layer(bounds),
+                LayerLogOp::End => self.pop_layer(),
+            }
+        }
+        debug_assert_eq!(self.layer_stack.len(), layer_depth);
+        let t_layers = t0.elapsed();
+
+        let start = primitives.start;
+        let end = primitives.end;
+        let src = &prev_scene.primitive_log;
+        let t1 = std::time::Instant::now();
+        extend_log_and_render(
+            &mut self.shadows,
+            &mut self.primitive_log.shadows,
+            &src.shadows[start.shadows..end.shadows],
+        );
+        let t_shadows = t1.elapsed();
+
+        let t2 = std::time::Instant::now();
+        extend_log_and_render(
+            &mut self.quads,
+            &mut self.primitive_log.quads,
+            &src.quads[start.quads..end.quads],
+        );
+        let t_quads = t2.elapsed();
+
+        let t3 = std::time::Instant::now();
+        extend_log_and_render(
+            &mut self.paths,
+            &mut self.primitive_log.paths,
+            &src.paths[start.paths..end.paths],
+        );
+        let t_paths = t3.elapsed();
+
+        extend_log_and_render(
+            &mut self.underlines,
+            &mut self.primitive_log.underlines,
+            &src.underlines[start.underlines..end.underlines],
+        );
+        extend_log_and_render(
+            &mut self.monochrome_sprites,
+            &mut self.primitive_log.monochrome_sprites,
+            &src.monochrome_sprites[start.monochrome_sprites..end.monochrome_sprites],
+        );
+
+        let t4 = std::time::Instant::now();
+        extend_log_and_render(
+            &mut self.subpixel_sprites,
+            &mut self.primitive_log.subpixel_sprites,
+            &src.subpixel_sprites[start.subpixel_sprites..end.subpixel_sprites],
+        );
+        let t_subpx = t4.elapsed();
+
+        extend_log_and_render(
+            &mut self.polychrome_sprites,
+            &mut self.primitive_log.polychrome_sprites,
+            &src.polychrome_sprites[start.polychrome_sprites..end.polychrome_sprites],
+        );
+        extend_log_and_render(
+            &mut self.surfaces,
+            &mut self.primitive_log.surfaces,
+            &src.surfaces[start.surfaces..end.surfaces],
+        );
+
+        println!(
+            "    [SCENE_REPLAY_CACHED] total={:?}, layers={:?}, shadows={:?}, quads={:?}, paths={:?}, subpx={:?}",
+            t0.elapsed(),
+            t_layers,
+            t_shadows,
+            t_quads,
+            t_paths,
+            t_subpx
+        );
     }
 
     pub fn finish(&mut self) {
@@ -192,7 +359,7 @@ impl Scene {
 }
 
 /// Records primitive vector lengths before painting a subtree, for post-paint scaling.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SceneCheckpoint {
     pub shadows: usize,
     pub quads: usize,
