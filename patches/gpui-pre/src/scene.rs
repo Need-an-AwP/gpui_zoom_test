@@ -237,14 +237,12 @@ impl Scene {
         layers: Range<usize>,
     ) {
         let t0 = std::time::Instant::now();
-        let layer_depth = self.layer_stack.len();
-        for op in &prev_scene.layer_log[layers] {
-            match *op {
-                LayerLogOp::Start(bounds) => self.push_layer(bounds),
-                LayerLogOp::End => self.pop_layer(),
-            }
-        }
-        debug_assert_eq!(self.layer_stack.len(), layer_depth);
+        // Skip replaying layers through push_layer/pop_layer to avoid expensive R-Tree insertions.
+        // DrawOrder is already baked into each primitive in primitive_log, and the outer
+        // paint_layer already establishes the global canvas ordering. We only copy the log
+        // slice so future cached frames maintain the same layer checkpoint offsets.
+        self.layer_log
+            .extend_from_slice(&prev_scene.layer_log[layers]);
         let t_layers = t0.elapsed();
 
         let start = primitives.start;
