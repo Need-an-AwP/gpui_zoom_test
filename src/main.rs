@@ -2,12 +2,13 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Context, CursorStyle, Element, ElementId,
     GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, Size, Style,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, point, px,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, point, px,
 };
 use gpui_fps::fps_monitor;
+use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{blue, green, red, white};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -272,6 +273,10 @@ impl Camera {
         self.zoom = k1;
     }
 
+    fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
     fn pan_to(&mut self, pan: Point<Pixels>) {
         self.pan = pan;
     }
@@ -284,11 +289,12 @@ struct HelloWorld {
     hud_x: Entity<InputState>,
     hud_y: Entity<InputState>,
     hud_zoom: Entity<InputState>,
+    _subscriptions: [Subscription; 3],
 }
 
 fn sync_hud_input(input: &Entity<InputState>, value: String, window: &mut Window, cx: &mut App) {
     input.update(cx, |state, cx| {
-        if state.text().to_string() != value {
+        if !state.focus_handle(cx).is_focused(window) && state.text().to_string() != value {
             state.set_value(value, window, cx);
         }
     });
@@ -301,14 +307,110 @@ impl HelloWorld {
         cards: Entity<CardsCanvas>,
         initial_pan: Point<Pixels>,
     ) -> Self {
+        let hud_x = cx.new(|cx| {
+            InputState::new(window, cx).default_value(format!("{:.1}", initial_pan.x.as_f32()))
+        });
+        let hud_y = cx.new(|cx| {
+            InputState::new(window, cx).default_value(format!("{:.1}", initial_pan.y.as_f32()))
+        });
+        let hud_zoom = cx.new(|cx| InputState::new(window, cx).default_value("1.000"));
+
+        let sub_x =
+            cx.subscribe_in(
+                &hud_x,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.commit_hud_x(window, cx);
+                        window.blur(cx);
+                    }
+                    _ => {}
+                },
+            );
+
+        let sub_y =
+            cx.subscribe_in(
+                &hud_y,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        this.commit_hud_y(window, cx);
+                        window.blur(cx);
+                    }
+                    _ => {}
+                },
+            );
+
+        let sub_zoom = cx.subscribe_in(
+            &hud_zoom,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    this.commit_hud_zoom(window, cx);
+                    window.blur(cx);
+                }
+                _ => {}
+            },
+        );
+
         Self {
             camera: Camera::new(1.0, initial_pan),
             drag_start: None,
             cards,
-            hud_x: cx.new(|cx| InputState::new(window, cx).default_value("0")),
-            hud_y: cx.new(|cx| InputState::new(window, cx).default_value("0")),
-            hud_zoom: cx.new(|cx| InputState::new(window, cx).default_value("1")),
+            hud_x,
+            hud_y,
+            hud_zoom,
+            _subscriptions: [sub_x, sub_y, sub_zoom],
         }
+    }
+
+    fn commit_hud_x(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.hud_x.read(cx).text().to_string();
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                self.camera.pan_to(point(px(val), self.camera.pan().y));
+            }
+        }
+        let norm_val = format!("{:.1}", self.camera.pan().x.as_f32());
+        self.hud_x.update(cx, |state, cx| {
+            if state.text().to_string() != norm_val {
+                state.set_value(norm_val, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn commit_hud_y(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.hud_y.read(cx).text().to_string();
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                self.camera.pan_to(point(self.camera.pan().x, px(val)));
+            }
+        }
+        let norm_val = format!("{:.1}", self.camera.pan().y.as_f32());
+        self.hud_y.update(cx, |state, cx| {
+            if state.text().to_string() != norm_val {
+                state.set_value(norm_val, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn commit_hud_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.hud_zoom.read(cx).text().to_string();
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                let anchor = window.viewport_size().center();
+                self.camera.zoom_to(val, anchor);
+            }
+        }
+        let norm_val = format!("{:.3}", self.camera.zoom());
+        self.hud_zoom.update(cx, |state, cx| {
+            if state.text().to_string() != norm_val {
+                state.set_value(norm_val, window, cx);
+            }
+        });
+        cx.notify();
     }
 
     fn camera_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -325,7 +427,6 @@ impl HelloWorld {
                 .child(
                     Input::new(input)
                         .small()
-                        .readonly(true)
                         .appearance(false)
                         .h(px(22.))
                         .w(px(88.))
@@ -351,6 +452,10 @@ impl HelloWorld {
             .bg(hsla(0., 0., 0.04, 0.92))
             .font_family("Consolas")
             .text_size(px(10.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -388,8 +493,15 @@ impl Render for HelloWorld {
             .bg(green(500).opacity(0.5))
             .when(is_dragging, |this| this.cursor(CursorStyle::Crosshair))
             .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, window, cx| {
+                    window.blur(cx);
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.blur(cx);
                     this.drag_start = Some((event.position, this.camera.pan()));
                     cx.notify();
                 }),
