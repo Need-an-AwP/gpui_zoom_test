@@ -302,15 +302,15 @@ impl Scene {
             &src.surfaces[start.surfaces..end.surfaces],
         );
 
-        println!(
-            "    [SCENE_REPLAY_CACHED] total={:?}, layers={:?}, shadows={:?}, quads={:?}, paths={:?}, subpx={:?}",
-            t0.elapsed(),
-            t_layers,
-            t_shadows,
-            t_quads,
-            t_paths,
-            t_subpx
-        );
+        // println!(
+        //     "    [SCENE_REPLAY_CACHED] total={:?}, layers={:?}, shadows={:?}, quads={:?}, paths={:?}, subpx={:?}",
+        //     t0.elapsed(),
+        //     t_layers,
+        //     t_shadows,
+        //     t_quads,
+        //     t_paths,
+        //     t_subpx
+        // );
     }
 
     pub fn finish(&mut self) {
