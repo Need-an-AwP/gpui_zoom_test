@@ -4,9 +4,11 @@ use canvas::{CanvasElement, CanvasFrame, DEFAULT_MAX_ZOOM, DEFAULT_MIN_ZOOM};
 use gpui_fps::fps_monitor;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{blue, green, red, white};
+use gpui_kit::component::{black, blue, green, red, white};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use gpui_kit::{
+    StatefulInteractiveElement as _, *,
+};
 
 const MD_SAMPLE: &str = r#"# Markdown 示例
 
@@ -32,40 +34,43 @@ fn main() {
 const GRID_COLS: usize = 10;
 const GRID_ROWS: usize = 10;
 const CARD_WIDTH: f32 = 380.;
-const CARD_HEIGHT: f32 = 580.;
-/// 世界坐标步进（小于卡片尺寸，允许重叠）。
 const GRID_STEP_X: f32 = CARD_WIDTH + 10.;
-const GRID_STEP_Y: f32 = CARD_HEIGHT + 10.;
+/// 初始行距。卡片高度由布局决定，不写进卡片样式。
+const GRID_STEP_Y: f32 = 590.;
 
 struct CanvasItem {
     world_pos: Point<Pixels>,
-    size: Size<Pixels>,
     view: Entity<CardView>,
 }
 
 struct CardView {
     button_red: bool,
-    /// 布局/cache 唯一尺寸来源；变更后 `cached_style` 与 `CanvasElement` 应一起更新。
-    layout_size: Size<Pixels>,
+    /// `layout_as_root` 得到的 border-box。有值后才走 `Entity::cached`。
+    resolved: Option<Size<Pixels>>,
+    /// 卡片根节点样式；悬停时在 `on_hover` 里改 `border_color` 并 `notify` 重绘。
+    card_style: StyleRefinement,
 }
 
 impl CardView {
-    fn new(layout_size: Size<Pixels>) -> Self {
+    fn new() -> Self {
+        let mut card_style = StyleRefinement::default();
+        card_style.border_color = Some(red(500));
         Self {
             button_red: true,
-            layout_size,
+            resolved: None,
+            card_style,
         }
     }
 
-    fn layout_size(&self) -> Size<Pixels> {
-        self.layout_size
+    fn set_border_hovered(style: &mut StyleRefinement, hovered: bool) {
+        style.border_color = Some(if hovered { red(300) } else { red(500) });
     }
 
-    /// `Entity::cached` 的布局样式，与 [`Self::layout_size`] 同步。
-    fn cached_style(&self) -> StyleRefinement {
+    /// 用上一帧 Taffy 尺寸生成确定的缓存样式。
+    fn cached_style(size: Size<Pixels>) -> StyleRefinement {
         let mut style = StyleRefinement::default();
-        style.size.width = Some(self.layout_size.width.into());
-        style.size.height = Some(self.layout_size.height.into());
+        style.size.width = Some(size.width.into());
+        style.size.height = Some(size.height.into());
         style
     }
 }
@@ -78,19 +83,28 @@ impl Render for CardView {
             .foreground(white())
             .hover(button_color)
             .active(button_color);
+        let card_border = self.card_style.border_color.unwrap_or(red(500));
 
         div()
-            .w(self.layout_size.width)
-            .h(self.layout_size.height)
+            .id(("card", cx.entity_id()))
+            .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
+            .flex_auto()
             .gap_3()
             .p_4()
             .rounded_md()
             .bg(button_color.opacity(0.5))
             .border_5()
-            .border_color(red(500))
-            .child(TextView::markdown("md-canvas-demo", MD_SAMPLE).selectable(false))
+            .border_color(card_border)
+            // .hover is useless because we skipped refreshing 
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                Self::set_border_hovered(&mut this.card_style, *hovered);
+                cx.notify();
+            }))
+            .child(
+                TextView::markdown("md-canvas-demo", MD_SAMPLE).selectable(false), // textview的文本选择状态更新会将所有的卡片标记dirty，导致大量重复全量刷新
+            )
             .child(
                 Button::new("color-toggle-0")
                     .custom(button_style)
@@ -175,7 +189,11 @@ impl Render for HelloWorld {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .bg(green(500).opacity(1.))
+                    .bg(linear_gradient(
+                        135.0,
+                        linear_color_stop(black(), 0.2),
+                        linear_color_stop(white(), 0.8),
+                    ))
                     // .when(is_dragging, |this| this.cursor(CursorStyle::Crosshair))// not working on windows
                     .on_mouse_down(
                         MouseButton::Left,
@@ -237,25 +255,34 @@ impl Render for HelloWorld {
                     }))
                     .child(
                         CanvasFrame::new(zoom, pan).children(self.items.iter().map(|item| {
-                            let card = item.view.read(cx);
-                            CanvasElement::new(
-                                item.world_pos,
-                                item.size,
-                                item.view.clone().cached(card.cached_style()),
+                            let resolved = item.view.read(cx).resolved;
+                            let child = match resolved {
+                                Some(size) => item
+                                    .view
+                                    .clone()
+                                    .cached(CardView::cached_style(size))
+                                    .into_any_element(),
+                                None => item.view.clone().into_any_element(),
+                            };
+                            let view = item.view.clone();
+                            CanvasElement::new(item.world_pos, child).on_measured(
+                                move |measured, cx| {
+                                    // 只收下第一次内容测量。之后空缓存节点的回声尺寸不再回写。
+                                    if view.read(cx).resolved.is_some() {
+                                        return false;
+                                    }
+                                    view.update(cx, |card, _cx| {
+                                        card.resolved = Some(measured);
+                                    });
+                                    true
+                                },
                             )
                         })),
                     ),
             )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .child(
-                        fps_monitor(window, cx)
-                            .frame_budget(std::time::Duration::from_nanos(8_333_333)),
-                    ),
-            )
+            .child(div().absolute().top_0().right_0().child(
+                fps_monitor(window, cx).frame_budget(std::time::Duration::from_nanos(8_333_333)),
+            ))
     }
 }
 
@@ -275,7 +302,6 @@ fn main() {
             },
             cx,
             |_, cx| {
-                let card_size = size(px(CARD_WIDTH), px(CARD_HEIGHT));
                 let origin = point(px(40.), px(40.));
                 let mut items = Vec::with_capacity(GRID_COLS * GRID_ROWS);
                 for row in 0..GRID_ROWS {
@@ -284,11 +310,9 @@ fn main() {
                             origin.x + px(col as f32 * GRID_STEP_X),
                             origin.y + px(row as f32 * GRID_STEP_Y),
                         );
-                        let view = cx.new(|_| CardView::new(card_size));
                         items.push(CanvasItem {
                             world_pos,
-                            size: card_size,
-                            view,
+                            view: cx.new(|_| CardView::new()),
                         });
                     }
                 }
