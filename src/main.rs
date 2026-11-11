@@ -90,7 +90,7 @@ impl Render for CardView {
             .bg(button_color.opacity(0.5))
             .border_5()
             .border_color(red(500))
-            .child(TextView::markdown("md-canvas-demo", MD_SAMPLE))
+            .child(TextView::markdown("md-canvas-demo", MD_SAMPLE).selectable(false))
             .child(
                 Button::new("color-toggle-0")
                     .custom(button_style)
@@ -235,23 +235,26 @@ impl Render for HelloWorld {
                         this.camera.zoom_to(k1, event.position);
                         cx.notify();
                     }))
-                    .child(CanvasFrame::new(zoom, pan).children(
-                        self.items.iter().map(|item| {
+                    .child(
+                        CanvasFrame::new(zoom, pan).children(self.items.iter().map(|item| {
                             let card = item.view.read(cx);
                             CanvasElement::new(
                                 item.world_pos,
                                 item.size,
                                 item.view.clone().cached(card.cached_style()),
                             )
-                        }),
-                    )),
+                        })),
+                    ),
             )
             .child(
                 div()
                     .absolute()
                     .top_0()
                     .right_0()
-                    .child(fps_monitor(window, cx)),
+                    .child(
+                        fps_monitor(window, cx)
+                            .frame_budget(std::time::Duration::from_nanos(8_333_333)),
+                    ),
             )
     }
 }

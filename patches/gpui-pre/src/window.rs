@@ -3478,6 +3478,29 @@ impl Window {
         ret
     }
 
+    /// Whether cached [`crate::View`] prepaint will be skipped for this draw because the window
+    /// was scheduled for a full redraw (see [`Window::refresh`]).
+    pub fn view_cache_refreshing(&self) -> bool {
+        self.refreshing
+    }
+
+    /// Runs `f` with [`Self::view_cache_refreshing`] overridden, restoring the previous value
+    /// afterward.
+    ///
+    /// Cached entity views consult this flag during prepaint. Clearing it for a subtree allows
+    /// cache reuse even when the window was scheduled for a full redraw.
+    #[inline]
+    pub fn with_view_cache_refreshing<R>(
+        &mut self,
+        refreshing: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.refreshing, refreshing);
+        let ret = f(self);
+        self.refreshing = previous;
+        ret
+    }
+
     /// Runs `f` with the active content mask expanded by `1/scale` around `pivot`.
     ///
     /// Use this around the prepaint of a subtree that will later be painted with
@@ -4030,7 +4053,7 @@ impl Window {
         let t0 = std::time::Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
         let t_draw = t0.elapsed();
-        println!("[PERF] present(DirectX)={:?}", t_draw);
+        // println!("[PERF] present(DirectX)={:?}", t_draw);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,

@@ -84,9 +84,12 @@ impl Element for CanvasFrame {
         let pan = self.pan;
 
         window.with_canvas_transform(pivot, zoom, pan, |window| {
-            for child in &mut self.children {
-                child.prepaint_at(pivot, window, cx);
-            }
+            // 欺骗refresh状态，使window在refreshing下也能沿用缓存
+            window.with_view_cache_refreshing(false, |window| {
+                for child in &mut self.children {
+                    child.prepaint_at(pivot, window, cx);
+                }
+            });
         });
     }
 
