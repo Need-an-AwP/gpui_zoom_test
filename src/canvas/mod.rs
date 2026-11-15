@@ -1,9 +1,11 @@
 //! 画布相机容器 [`CanvasFrame`] 与世界坐标子元素 [`CanvasElement`]。
 
+mod camera;
 mod element;
 mod frame;
 mod overlay;
 
+pub use camera::Camera;
 pub use element::CanvasElement;
 pub use frame::CanvasFrame;
 pub use overlay::{ResizeAxis, SelectionOverlay};
