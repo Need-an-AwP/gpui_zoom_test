@@ -5,7 +5,10 @@ use canvas::{
 };
 use gpui_fps::fps_monitor;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::{IndexPath, Sizable as _};
 use gpui_kit::component::{black, blue, green, red, white};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{StatefulInteractiveElement as _, *};
@@ -166,8 +169,34 @@ impl Camera {
     }
 }
 
+/// 卡片选择器的选项；value 为卡片在 items 中的下标。
+#[derive(Clone)]
+struct CardOption {
+    index: usize,
+    title: SharedString,
+}
+
+impl SelectItem for CardOption {
+    type Value = usize;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &usize {
+        &self.index
+    }
+}
+
+type CardSelectState = SelectState<SearchableVec<CardOption>>;
+
 struct HelloWorld {
     camera: Camera,
+    /// 最近一帧的窗口客户区，选择卡片时用来对准视口中心。
+    viewport_size: Size<Pixels>,
+    /// 相机 HUD 里的卡片选择器。单向数据流：选择 -> 相机，相机变化不会回写选择器。
+    card_select: Entity<CardSelectState>,
+    _card_select_sub: Subscription,
     drag_start: Option<(Point<Pixels>, Point<Pixels>)>,
     items: Vec<CanvasItem>,
     selected_index: Option<usize>,
@@ -186,19 +215,132 @@ struct ResizeDrag {
 }
 
 impl HelloWorld {
-    fn new(items: Vec<CanvasItem>) -> Self {
+    fn new(items: Vec<CanvasItem>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let options: Vec<CardOption> = (0..items.len())
+            .map(|index| CardOption {
+                index,
+                title: format!("Card {} (r{}, c{})", index + 1, index / GRID_COLS, index % GRID_COLS).into(),
+            })
+            .collect();
+        // 初始为空：不选中任何卡片。
+        let card_select = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(options), None::<IndexPath>, window, cx).searchable(true)
+        });
+        let sub = cx.subscribe(&card_select, |this, _, event: &SelectEvent<SearchableVec<CardOption>>, cx| {
+            let SelectEvent::Confirm(Some(index)) = event else {
+                return;
+            };
+            this.move_camera_to_card(*index, cx);
+            cx.notify();
+        });
         Self {
+            card_select,
+            _card_select_sub: sub,
             camera: Camera::new(1.0, Point::default()),
+            viewport_size: window.viewport_size(),
             drag_start: None,
             items,
             selected_index: Some(0),
             resizing: None,
         }
     }
+
+    /// 选中卡片并平移相机，使卡片中心落在视口中心；缩放保持不变。尺寸尚未测量则只选中、不移动。
+    fn move_camera_to_card(&mut self, index: usize, cx: &App) {
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        self.selected_index = Some(index);
+        let Some(size) = item.view.read(cx).resolved else {
+            return;
+        };
+        let zoom = self.camera.zoom();
+        let card_center = item.world_pos + size.center();
+        // screen = world * zoom + pan，令卡片中心落在视口中心。
+        self.camera
+            .pan_to(self.viewport_size.center() - card_center * zoom);
+    }
+
+    /// 解析文本并设置 pan.x；非法输入忽略。
+    #[allow(dead_code)]
+    fn commit_hud_x(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                self.camera.pan_to(point(px(val), self.camera.pan().y));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 解析文本并设置 pan.y；非法输入忽略。
+    #[allow(dead_code)]
+    fn commit_hud_y(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                self.camera.pan_to(point(self.camera.pan().x, px(val)));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 解析文本并以窗口中心为锚点缩放；非法输入忽略。
+    #[allow(dead_code)]
+    fn commit_hud_zoom(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(val) = text.trim().parse::<f32>() {
+            if val.is_finite() {
+                let anchor = window.viewport_size().center();
+                self.camera.zoom_to(val, anchor);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 仅文本显示的相机 HUD，不拦截任何输入事件之外的开销。
+    fn camera_hud(&self) -> impl IntoElement {
+        let hud_fg = hsla(0., 0., 0.98, 1.);
+        let hud_muted = hsla(0., 0., 0.62, 1.);
+        let pan = self.camera.pan();
+        let row = move |label: &'static str, value: String| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(div().w(px(40.)).text_color(hud_muted).child(label))
+                .child(div().text_color(hud_fg).child(value))
+        };
+        div()
+            .absolute()
+            .top(px(12.))
+            .left(px(12.))
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(px(168.))
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded(px(4.))
+            .bg(hsla(0., 0., 0.04, 0.92))
+            .font_family("Consolas")
+            .text_size(px(10.))
+            .child(row("X", format!("{:.1}", pan.x.as_f32())))
+            .child(row("Y", format!("{:.1}", pan.y.as_f32())))
+            .child(row("ZOOM", format!("{:.3}", self.camera.zoom())))
+            .child(
+                Select::new(&self.card_select)
+                    .id("card-select")
+                    .xsmall()
+                    // .with_size(gpui_kit::component::Size::Small)
+                    .placeholder("跳转到卡片")
+                    .w_full(),
+            )
+    }
 }
 
 impl Render for HelloWorld {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport_size = window.viewport_size();
         let zoom = self.camera.zoom();
         let pan = self.camera.pan();
 
@@ -388,6 +530,7 @@ impl Render for HelloWorld {
             .child(div().absolute().top_0().right_0().child(
                 fps_monitor(window, cx).frame_budget(std::time::Duration::from_nanos(8_333_333)),
             ))
+            .child(self.camera_hud())
     }
 }
 
@@ -406,7 +549,7 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            |_, cx| {
+            |window, cx| {
                 let origin = point(px(40.), px(40.));
                 let mut items = Vec::with_capacity(GRID_COLS * GRID_ROWS);
                 for row in 0..GRID_ROWS {
@@ -421,7 +564,7 @@ fn main() {
                         });
                     }
                 }
-                cx.new(|_| HelloWorld::new(items))
+                cx.new(|cx| HelloWorld::new(items, window, cx))
             },
         )
         .expect("Failed to open window");
