@@ -1,4 +1,5 @@
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{blue, red, white};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -37,6 +38,9 @@ pub struct CanvasItem {
 
 pub struct CardView {
     button_red: bool,
+    editing: bool,
+    markdown: SharedString,
+    textarea_state: Option<Entity<TextareaState>>,
     /// `layout_as_root` 得到的 border-box。有值后才走 `Entity::cached`。
     pub resolved: Option<Size<Pixels>>,
     /// 卡片根节点样式；悬停时在 `on_hover` 里改 `border_color` 并 `notify` 重绘。
@@ -51,10 +55,34 @@ impl CardView {
         card_style.border_color = Some(red(500));
         Self {
             button_red: true,
+            editing: false,
+            markdown: MD_SAMPLE.into(),
+            textarea_state: None,
             resolved: None,
             card_style,
             fixed_size: None,
         }
+    }
+
+    /// 在展示态与编辑态之间切换；切回展示态时同步文本内容，切入编辑态时按需创建 `TextareaState`。
+    fn toggle_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing {
+            if let Some(state) = &self.textarea_state {
+                self.markdown = state.read(cx).value();
+            }
+            self.editing = false;
+        } else {
+            let md = self.markdown.clone();
+            self.textarea_state.get_or_insert_with(|| {
+                cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .default_value(md)
+                        .auto_grow(1, 100)
+                })
+            });
+            self.editing = true;
+        }
+        cx.notify();
     }
 
     /// 写入新的固定尺寸。尺寸已知，直接更新 `resolved`，无需再测量；只重绘这一张卡片。
@@ -90,7 +118,9 @@ impl Render for CardView {
         div()
             .id(("card", cx.entity_id()))
             .w(self.fixed_size.map_or(px(CARD_WIDTH), |s| s.width))
-            .when_some(self.fixed_size, |this, s| this.h(s.height).overflow_hidden())
+            .when_some(self.fixed_size, |this, s| {
+                this.h(s.height).overflow_hidden()
+            })
             .flex()
             .flex_col()
             .flex_auto()
@@ -105,18 +135,49 @@ impl Render for CardView {
                 Self::set_border_hovered(&mut this.card_style, *hovered);
                 cx.notify();
             }))
+            .child(if self.editing {
+                let state = self
+                    .textarea_state
+                    .as_ref()
+                    .expect("textarea_state initialized when editing");
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(Textarea::new(state).w_full())
+                    .into_any_element()
+            } else {
+                // textview的文本选择状态更新会将所有的卡片标记dirty，导致大量重复全量刷新
+                TextView::markdown(("md-canvas-demo", cx.entity_id()), self.markdown.clone())
+                    .selectable(false)
+                    .into_any_element()
+            })
             .child(
-                TextView::markdown("md-canvas-demo", MD_SAMPLE).selectable(false), // textview的文本选择状态更新会将所有的卡片标记dirty，导致大量重复全量刷新
-            )
-            .child(
-                Button::new("color-toggle-0")
-                    .custom(button_style)
-                    .label("切换颜色")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.button_red = !this.button_red;
-                        cx.notify();
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("color-toggle-0")
+                            .flex_1()
+                            .custom(button_style)
+                            .label("切换颜色")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.button_red = !this.button_red;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("mode-toggle-0")
+                            .flex_1()
+                            .custom(button_style)
+                            .label(if self.editing { "展示" } else { "编辑" })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_edit(window, cx);
+                            })),
+                    ),
             )
     }
 }

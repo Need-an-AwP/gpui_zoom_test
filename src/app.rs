@@ -1,9 +1,13 @@
 use crate::canvas::{Camera, CanvasElement, CanvasFrame, ResizeAxis, SelectionOverlay};
 use crate::card::{CanvasItem, CardView, MIN_CARD_SIZE};
-use crate::hud::{CardOption, CardSelectState, build_card_select, camera_hud};
+use crate::hud::{
+    CardOption, CardSelectState, ZoomOption, ZoomSelectState, build_card_select, build_zoom_select,
+    build_zoom_slider, camera_hud,
+};
 use gpui_fps::fps_monitor;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::SelectEvent;
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{black, white};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -22,7 +26,11 @@ pub struct CanvasWorkspace {
     viewport_size: Size<Pixels>,
     /// 相机 HUD 里的卡片选择器。单向数据流：选择 -> 相机，相机变化不会回写选择器。
     card_select: Entity<CardSelectState>,
-    _card_select_sub: Subscription,
+    /// 相机 HUD 里的缩放滑块。双向数据流：滑块 <-> 相机。
+    zoom_slider: Entity<SliderState>,
+    /// 相机 HUD 里的缩放预设选择器。单向触发：选中 -> 曲线缩放动画。
+    zoom_select: Entity<ZoomSelectState>,
+    _subscriptions: [Subscription; 3],
     drag_start: Option<(Point<Pixels>, Point<Pixels>)>,
     items: Vec<CanvasItem>,
     selected_index: Option<usize>,
@@ -37,7 +45,9 @@ impl CanvasWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let card_select = build_card_select(items.len(), grid_cols, window, cx);
-        let sub = cx.subscribe(
+        let zoom_slider = build_zoom_slider(1.0, cx);
+        let zoom_select = build_zoom_select(window, cx);
+        let card_sub = cx.subscribe(
             &card_select,
             |this, _, event: &SelectEvent<SearchableVec<CardOption>>, cx| {
                 let SelectEvent::Confirm(Some(index)) = event else {
@@ -47,9 +57,30 @@ impl CanvasWorkspace {
                 cx.notify();
             },
         );
+        let zoom_slider_sub = cx.subscribe(&zoom_slider, |this, _, event: &SliderEvent, cx| {
+            let SliderEvent::Change(value) = event else {
+                return;
+            };
+            this.camera
+                .zoom_to(value.end(), this.viewport_size.center());
+            cx.notify();
+        });
+        let zoom_select_sub = cx.subscribe(
+            &zoom_select,
+            |this, _, event: &SelectEvent<SearchableVec<ZoomOption>>, cx| {
+                let SelectEvent::Confirm(Some(zoom)) = event else {
+                    return;
+                };
+                this.camera
+                    .animate_zoom_to(*zoom, this.viewport_size.center());
+                cx.notify();
+            },
+        );
         Self {
             card_select,
-            _card_select_sub: sub,
+            zoom_slider,
+            zoom_select,
+            _subscriptions: [card_sub, zoom_slider_sub, zoom_select_sub],
             camera: Camera::new(1.0, Point::default()),
             viewport_size: window.viewport_size(),
             drag_start: None,
@@ -75,10 +106,11 @@ impl CanvasWorkspace {
 
     /// 解析文本并设置 pan.x；非法输入忽略。
     #[allow(dead_code)]
-    fn commit_hud_x(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn commit_hud_x(&mut self, text: &str, window: &Window, cx: &mut Context<Self>) {
         if let Ok(val) = text.trim().parse::<f32>() {
             if val.is_finite() {
-                self.camera.pan_to(point(px(val), self.camera.pan().y));
+                let pan = self.camera.pan(window);
+                self.camera.pan_to(point(px(val), pan.y));
             }
         }
         cx.notify();
@@ -86,13 +118,24 @@ impl CanvasWorkspace {
 
     /// 解析文本并设置 pan.y；非法输入忽略。
     #[allow(dead_code)]
-    fn commit_hud_y(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn commit_hud_y(&mut self, text: &str, window: &Window, cx: &mut Context<Self>) {
         if let Ok(val) = text.trim().parse::<f32>() {
             if val.is_finite() {
-                self.camera.pan_to(point(self.camera.pan().x, px(val)));
+                let pan = self.camera.pan(window);
+                self.camera.pan_to(point(pan.x, px(val)));
             }
         }
         cx.notify();
+    }
+
+    /// 将当前相机缩放同步回 HUD 滑块；仅在外部修改缩放且值有变化时更新，避免反馈循环与无效重绘。
+    fn sync_zoom_slider(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let zoom = self.camera.zoom();
+        self.zoom_slider.update(cx, |state, cx| {
+            if (state.value().end() - zoom).abs() > f32::EPSILON {
+                state.set_value(zoom, window, cx);
+            }
+        });
     }
 
     /// 解析文本并以窗口中心为锚点缩放；非法输入忽略。
@@ -102,6 +145,7 @@ impl CanvasWorkspace {
             if val.is_finite() {
                 let anchor = window.viewport_size().center();
                 self.camera.zoom_to(val, anchor);
+                self.sync_zoom_slider(window, cx);
             }
         }
         cx.notify();
@@ -110,12 +154,16 @@ impl CanvasWorkspace {
 
 impl Render for CanvasWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.camera.tick_pan(std::time::Instant::now()) {
+        let tick = self.camera.tick(std::time::Instant::now());
+        if tick.animating {
             window.request_animation_frame();
+        }
+        if tick.zoom_changed {
+            self.sync_zoom_slider(window, cx);
         }
         self.viewport_size = window.viewport_size();
         let zoom = self.camera.zoom();
-        let pan = self.camera.pan();
+        let pan = self.camera.pan(window);
 
         div()
             .flex()
@@ -137,17 +185,17 @@ impl Render for CanvasWorkspace {
                         linear_color_stop(white(), 0.8),
                     ))
                     // .when(is_dragging, |this| this.cursor(CursorStyle::Crosshair))// not working on windows
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, window, cx| {
-                            window.blur(cx);
-                        }),
-                    )
+                    // .on_mouse_down(
+                    //     MouseButton::Left,
+                    //     cx.listener(|_, _, window, cx| {
+                    //         window.blur(cx);
+                    //     }),
+                    // )
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             window.blur(cx);
-                            let pan = this.camera.pan();
+                            let pan = this.camera.pan(window);
                             this.camera.pan_to(pan);
                             this.drag_start = Some((event.position, pan));
                             cx.notify();
@@ -179,7 +227,7 @@ impl Render for CanvasWorkspace {
                             this.resizing = None;
                         }),
                     )
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                         if let Some(drag) = this.resizing {
                             if event.pressed_button != Some(MouseButton::Left) {
                                 this.resizing = None;
@@ -208,7 +256,7 @@ impl Render for CanvasWorkspace {
                         if let Some((start_pos, start_pan)) = this.drag_start {
                             if event.pressed_button == Some(MouseButton::Middle) {
                                 let new_pan = start_pan + (event.position - start_pos);
-                                if this.camera.pan() != new_pan {
+                                if this.camera.pan(window) != new_pan {
                                     this.camera.pan_to(new_pan);
                                     cx.notify();
                                 }
@@ -218,7 +266,7 @@ impl Render for CanvasWorkspace {
                             }
                         }
                     }))
-                    .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
+                    .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                         let delta_y = match event.delta {
                             ScrollDelta::Pixels(p) => p.y.as_f32(),
                             ScrollDelta::Lines(l) => {
@@ -232,6 +280,7 @@ impl Render for CanvasWorkspace {
                         let factor = (1.0 + delta_y * 0.002).clamp(0.8, 1.25);
                         let k1 = this.camera.zoom() * factor;
                         this.camera.zoom_to(k1, event.position);
+                        this.sync_zoom_slider(window, cx);
                         cx.notify();
                     }))
                     .child(
@@ -304,9 +353,18 @@ impl Render for CanvasWorkspace {
                         )
                     })),
             )
-            .child(div().absolute().top_0().right_0().child(
-                fps_monitor(window, cx).frame_budget(std::time::Duration::from_nanos(8_333_333)),
+            .child(
+                div().absolute().top_0().right_0().child(
+                    fps_monitor(window, cx)
+                        .frame_budget(std::time::Duration::from_secs_f32(1.0 / 60.0)),
+                ),
+            )
+            .child(camera_hud(
+                window,
+                &self.camera,
+                &self.zoom_slider,
+                &self.zoom_select,
+                &self.card_select,
             ))
-            .child(camera_hud(&self.camera, &self.card_select))
     }
 }
