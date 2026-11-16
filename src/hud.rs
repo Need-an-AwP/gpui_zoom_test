@@ -134,7 +134,11 @@ pub fn camera_hud(
         .py_1p5()
         .rounded(px(4.))
         .bg(hsla(0., 0., 0.04, 0.92))
-        .font_family("Consolas")
+        .font_family(if cfg!(target_family = "wasm") {
+            "Noto Sans"
+        } else {
+            "Consolas"
+        })
         .text_size(px(10.))
         .child(row("X", format!("{:.1}", pan.x.as_f32())))
         .child(row("Y", format!("{:.1}", pan.y.as_f32())))

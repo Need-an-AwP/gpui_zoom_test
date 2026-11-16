@@ -11,6 +11,10 @@ use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{black, white};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 #[derive(Clone, Copy)]
 struct ResizeDrag {
@@ -154,7 +158,7 @@ impl CanvasWorkspace {
 
 impl Render for CanvasWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tick = self.camera.tick(std::time::Instant::now());
+        let tick = self.camera.tick(Instant::now());
         if tick.animating {
             window.request_animation_frame();
         }
@@ -166,6 +170,7 @@ impl Render for CanvasWorkspace {
         let pan = self.camera.pan(window);
 
         div()
+            .font_family(gpui_kit::component::Theme::global(cx).font_family.clone())
             .flex()
             .flex_col()
             .size_full()

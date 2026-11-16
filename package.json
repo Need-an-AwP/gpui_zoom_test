@@ -2,6 +2,8 @@
   "name": "gpui_zoom_test",
   "private": true,
   "scripts": {
+    "wasm": "wasm-pack build --dev --target web --out-dir web/src/wasm",
+    "wasm:release": "wasm-pack build --release --target web --out-dir web/src/wasm",
     "dev": "pnpm --filter web dev",
     "build": "pnpm --filter web build",
     "preview": "pnpm --filter web preview"

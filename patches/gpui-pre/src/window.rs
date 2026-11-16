@@ -3561,12 +3561,12 @@ impl Window {
     ) -> R {
         self.invalidator.debug_assert_paint();
         let cp = self.next_frame.scene.checkpoint();
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let ret = self.with_canvas_transform(pivot, scale, pan, f);
         let t_inner = t0.elapsed();
         let scaled_pivot = pivot.scale(self.scale_factor());
         let scaled_pan = pan.scale(self.scale_factor());
-        let t1 = std::time::Instant::now();
+        let t1 = Instant::now();
         self.next_frame.scene.scale_since(cp, scaled_pivot, scale, scaled_pan);
         let t_scale = t1.elapsed();
         println!(
@@ -3891,10 +3891,10 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
-        let t_start = std::time::Instant::now();
+        let t_start = Instant::now();
         let mut t_draw_roots = std::time::Duration::ZERO;
         if !cx.mode.skip_drawing() {
-            let t0 = std::time::Instant::now();
+            let t0 = Instant::now();
             self.draw_roots(cx);
             t_draw_roots = t0.elapsed();
             #[cfg(feature = "profiler")]
@@ -3942,7 +3942,7 @@ impl Window {
 
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
-        let t_finish_start = std::time::Instant::now();
+        let t_finish_start = Instant::now();
         self.next_frame.finish(&mut self.rendered_frame);
         let t_finish = t_finish_start.elapsed();
 
@@ -4050,7 +4050,7 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
         let t_draw = t0.elapsed();
         // println!("[PERF] present(DirectX)={:?}", t_draw);
@@ -4512,7 +4512,7 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4533,7 +4533,7 @@ impl Window {
                 .iter_mut()
                 .map(|handler| handler.take()),
         );
-        let t_listeners_start = std::time::Instant::now();
+        let t_listeners_start = Instant::now();
         let mouse_count = range.end.mouse_listeners_index - range.start.mouse_listeners_index;
         let current_transform = self.current_scaled_transform();
         self.next_frame.mouse_listener_transforms.extend(
@@ -4561,12 +4561,12 @@ impl Window {
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
 
-        let t_text_start = std::time::Instant::now();
+        let t_text_start = Instant::now();
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
         let t_text = t_text_start.elapsed();
 
-        let t_scene_start = std::time::Instant::now();
+        let t_scene_start = Instant::now();
         self.next_frame.scene.replay_cached(
             &self.rendered_frame.scene,
             range.start.primitives..range.end.primitives,

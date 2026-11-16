@@ -2,6 +2,7 @@
 #![cfg_attr(windows, allow(dead_code))]
 
 use schemars::JsonSchema;
+use scheduler::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -236,7 +237,7 @@ impl Scene {
         primitives: Range<SceneCheckpoint>,
         layers: Range<usize>,
     ) {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         // Skip replaying layers through push_layer/pop_layer to avoid expensive R-Tree insertions.
         // DrawOrder is already baked into each primitive in primitive_log, and the outer
         // paint_layer already establishes the global canvas ordering. We only copy the log
@@ -248,7 +249,7 @@ impl Scene {
         let start = primitives.start;
         let end = primitives.end;
         let src = &prev_scene.primitive_log;
-        let t1 = std::time::Instant::now();
+        let t1 = Instant::now();
         extend_log_and_render(
             &mut self.shadows,
             &mut self.primitive_log.shadows,
@@ -256,7 +257,7 @@ impl Scene {
         );
         let t_shadows = t1.elapsed();
 
-        let t2 = std::time::Instant::now();
+        let t2 = Instant::now();
         extend_log_and_render(
             &mut self.quads,
             &mut self.primitive_log.quads,
@@ -264,7 +265,7 @@ impl Scene {
         );
         let t_quads = t2.elapsed();
 
-        let t3 = std::time::Instant::now();
+        let t3 = Instant::now();
         extend_log_and_render(
             &mut self.paths,
             &mut self.primitive_log.paths,
@@ -283,7 +284,7 @@ impl Scene {
             &src.monochrome_sprites[start.monochrome_sprites..end.monochrome_sprites],
         );
 
-        let t4 = std::time::Instant::now();
+        let t4 = Instant::now();
         extend_log_and_render(
             &mut self.subpixel_sprites,
             &mut self.primitive_log.subpixel_sprites,

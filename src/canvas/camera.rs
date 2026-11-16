@@ -1,4 +1,8 @@
 use gpui_kit::{Pixels, Point, Size, Window, point, px};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use super::{DEFAULT_MAX_ZOOM, DEFAULT_MIN_ZOOM};
 
@@ -19,13 +23,13 @@ fn ease_in_out_cubic(t: f32) -> f32 {
 }
 
 struct PanAnimation {
-    start_time: std::time::Instant,
+    start_time: Instant,
     from: Point<Pixels>,
     to: Point<Pixels>,
 }
 
 struct ZoomAnimation {
-    start_time: std::time::Instant,
+    start_time: Instant,
     from_zoom: f32,
     to_zoom: f32,
     anchor: Point<Pixels>,
@@ -127,7 +131,7 @@ impl Camera {
             return;
         }
         self.active_pan = Some(PanAnimation {
-            start_time: std::time::Instant::now(),
+            start_time: Instant::now(),
             from: self.pan,
             to: target,
         });
@@ -143,7 +147,7 @@ impl Camera {
         }
         let anchor_world = self.screen_to_world(anchor);
         self.active_zoom = Some(ZoomAnimation {
-            start_time: std::time::Instant::now(),
+            start_time: Instant::now(),
             from_zoom: self.zoom,
             to_zoom: target,
             anchor,
@@ -161,7 +165,7 @@ impl Camera {
     }
 
     /// 推进相机动画（平移与缩放）。
-    pub fn tick(&mut self, now: std::time::Instant) -> CameraTick {
+    pub fn tick(&mut self, now: Instant) -> CameraTick {
         let pan_animating = self.tick_pan(now);
         let (zoom_animating, zoom_changed) = self.tick_zoom(now);
         CameraTick {
@@ -170,7 +174,7 @@ impl Camera {
         }
     }
 
-    fn tick_pan(&mut self, now: std::time::Instant) -> bool {
+    fn tick_pan(&mut self, now: Instant) -> bool {
         let Some(anim) = &self.active_pan else {
             return false;
         };
@@ -192,7 +196,7 @@ impl Camera {
         }
     }
 
-    fn tick_zoom(&mut self, now: std::time::Instant) -> (bool, bool) {
+    fn tick_zoom(&mut self, now: Instant) -> (bool, bool) {
         let Some(anim) = &self.active_zoom else {
             return (false, false);
         };
