@@ -8484,3 +8484,7 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.5",
 ]
+
+[[patch.unused]]
+name = "gpui-pre-wgpu"
+version = "0.3.13"
