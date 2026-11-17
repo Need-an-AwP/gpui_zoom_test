@@ -21,6 +21,7 @@ pub fn run() {
             return;
         }
         init(cx);
+        cx.set_text_rendering_mode(TextRenderingMode::Grayscale); // only monochrome text
         #[cfg(target_family = "wasm")]
         apply_web_theme_fonts(cx);
 

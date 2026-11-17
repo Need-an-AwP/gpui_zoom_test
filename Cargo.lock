@@ -2553,8 +2553,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -8484,7 +8482,3 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.5",
 ]
-
-[[patch.unused]]
-name = "gpui-pre-wgpu"
-version = "0.3.13"

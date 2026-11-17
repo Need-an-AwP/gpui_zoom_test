@@ -1,4 +1,4 @@
-// Modified for gpui-pre (snapshot of zed@125ca86): adapt device queues and sRGB detection to wgpu 30.0.1.
+// Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
@@ -216,6 +216,11 @@ impl WgpuAtlasTextures {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        log::info!(
+            "WgpuAtlas allocated texture: kind={kind:?}, size={}x{}, format={format:?}, mip_level_count=1, sample_count=1",
+            size.width.0,
+            size.height.0,
+        );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
