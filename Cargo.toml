@@ -18,3 +18,6 @@ web-time = "1.1"
 gpui-pre = { path = "patches/gpui-pre" }
 gpui-base = { path = "patches/gpui-base" }
 gpui-pre-wgpu = { path = "patches/gpui-pre-wgpu" }
+
+[profile.dev]
+opt-level = 2

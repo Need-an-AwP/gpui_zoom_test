@@ -1,6 +1,6 @@
 // Modified for gpui-pre (snapshot of zed@f816e1f): adapt device queues and sRGB detection to wgpu 30.0.1.
 use anyhow::{Context as _, Result};
-use etagere::{BucketedAtlasAllocator, size2};
+use etagere::{AllocatorOptions, BucketedAtlasAllocator, DEFAULT_OPTIONS, size2};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
@@ -9,6 +9,54 @@ use parking_lot::Mutex;
 use std::{borrow::Cow, ops, sync::Arc};
 
 use crate::WgpuContext;
+
+const MONOCHROME_MIP_LEVEL_COUNT: u32 = 4;
+const MONOCHROME_TILE_ALIGNMENT: i32 = 1 << (MONOCHROME_MIP_LEVEL_COUNT - 1);
+
+fn align_up(value: i32, alignment: i32) -> i32 {
+    let rem = value % alignment;
+    if rem == 0 {
+        value
+    } else {
+        value + (alignment - rem)
+    }
+}
+
+fn monochrome_padded_size(size: Size<DevicePixels>) -> Size<DevicePixels> {
+    Size {
+        width: DevicePixels(align_up(
+            size.width.0 + MONOCHROME_TILE_ALIGNMENT,
+            MONOCHROME_TILE_ALIGNMENT,
+        )),
+        height: DevicePixels(align_up(
+            size.height.0 + MONOCHROME_TILE_ALIGNMENT,
+            MONOCHROME_TILE_ALIGNMENT,
+        )),
+    }
+}
+
+fn downsample_monochrome_mip(src: &[u8], src_width: u32, src_height: u32) -> Vec<u8> {
+    let dst_width = (src_width / 2).max(1);
+    let dst_height = (src_height / 2).max(1);
+    let mut dst = vec![0u8; (dst_width * dst_height) as usize];
+    let stride = src_width as usize;
+    for y in 0..dst_height as usize {
+        let sy0 = y * 2;
+        let sy1 = (sy0 + 1).min(src_height as usize - 1);
+        let row0 = sy0 * stride;
+        let row1 = sy1 * stride;
+        for x in 0..dst_width as usize {
+            let sx0 = x * 2;
+            let sx1 = (sx0 + 1).min(src_width as usize - 1);
+            let a = src[row0 + sx0] as u32;
+            let b = src[row0 + sx1] as u32;
+            let c = src[row1 + sx0] as u32;
+            let d = src[row1 + sx1] as u32;
+            dst[y * dst_width as usize + x] = ((a + b + c + d + 2) / 4) as u8;
+        }
+    }
+    dst
+}
 
 fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
     size2(size.width.0, size.height.0)
@@ -196,7 +244,30 @@ impl WgpuAtlasTextures {
             height: DevicePixels(max_texture_size),
         };
 
-        let size = min_size.min(&max_atlas_size).max(&DEFAULT_ATLAS_SIZE);
+        let (size, mip_level_count, allocator) = match kind {
+            AtlasTextureKind::Monochrome => {
+                let aligned_max = max_texture_size & !(MONOCHROME_TILE_ALIGNMENT - 1);
+                let aligned_max_size = Size {
+                    width: DevicePixels(aligned_max),
+                    height: DevicePixels(aligned_max),
+                };
+                let padded_min = monochrome_padded_size(min_size);
+                let size = padded_min.min(&aligned_max_size).max(&DEFAULT_ATLAS_SIZE);
+                let allocator = BucketedAtlasAllocator::with_options(
+                    device_size_to_etagere(size),
+                    &AllocatorOptions {
+                        alignment: size2(MONOCHROME_TILE_ALIGNMENT, MONOCHROME_TILE_ALIGNMENT),
+                        ..DEFAULT_OPTIONS
+                    },
+                );
+                (size, MONOCHROME_MIP_LEVEL_COUNT, allocator)
+            }
+            AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => {
+                let size = min_size.min(&max_atlas_size).max(&DEFAULT_ATLAS_SIZE);
+                let allocator = BucketedAtlasAllocator::new(device_size_to_etagere(size));
+                (size, 1, allocator)
+            }
+        };
         let format = match kind {
             AtlasTextureKind::Monochrome => wgpu::TextureFormat::R8Unorm,
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
@@ -209,7 +280,7 @@ impl WgpuAtlasTextures {
                 height: size.height.0 as u32,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
@@ -217,7 +288,7 @@ impl WgpuAtlasTextures {
             view_formats: &[],
         });
         log::info!(
-            "WgpuAtlas allocated texture: kind={kind:?}, size={}x{}, format={format:?}, mip_level_count=1, sample_count=1",
+            "WgpuAtlas allocated texture: kind={kind:?}, size={}x{}, format={format:?}, mip_level_count={mip_level_count}, sample_count=1",
             size.width.0,
             size.height.0,
         );
@@ -235,8 +306,9 @@ impl WgpuAtlasTextures {
                 kind,
             },
             generation,
-            allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator,
             format,
+            mip_level_count,
             texture,
             view,
             live_atlas_keys: 0,
@@ -275,31 +347,85 @@ impl WgpuAtlasTextures {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
             };
-            let bytes_per_pixel = texture.bytes_per_pixel();
 
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: upload.bounds.origin.x.0 as u32,
-                        y: upload.bounds.origin.y.0 as u32,
-                        z: 0,
+            if upload.id.kind == AtlasTextureKind::Monochrome && texture.mip_level_count > 1 {
+                let padded_size = monochrome_padded_size(upload.bounds.size);
+                let mut mip_width = padded_size.width.0 as u32;
+                let mut mip_height = padded_size.height.0 as u32;
+                let src_width = upload.bounds.size.width.0 as usize;
+                let src_height = upload.bounds.size.height.0 as usize;
+
+                let mut mip_data = vec![0u8; (mip_width * mip_height) as usize];
+                for y in 0..src_height {
+                    let src_offset = y * src_width;
+                    let dst_offset = y * (mip_width as usize);
+                    mip_data[dst_offset..dst_offset + src_width]
+                        .copy_from_slice(&upload.data[src_offset..src_offset + src_width]);
+                }
+
+                let origin_x = upload.bounds.origin.x.0 as u32;
+                let origin_y = upload.bounds.origin.y.0 as u32;
+
+                for level in 0..texture.mip_level_count {
+                    if level > 0 {
+                        mip_data = downsample_monochrome_mip(&mip_data, mip_width, mip_height);
+                        mip_width = (mip_width / 2).max(1);
+                        mip_height = (mip_height / 2).max(1);
+                    }
+
+                    self.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture.texture,
+                            mip_level: level,
+                            origin: wgpu::Origin3d {
+                                x: origin_x >> level,
+                                y: origin_y >> level,
+                                z: 0,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &mip_data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(mip_width),
+                            rows_per_image: None,
+                        },
+                        wgpu::Extent3d {
+                            width: mip_width,
+                            height: mip_height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            } else {
+                let bytes_per_pixel = texture.bytes_per_pixel();
+
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: upload.bounds.origin.x.0 as u32,
+                            y: upload.bounds.origin.y.0 as u32,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
                     },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &upload.data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(upload.bounds.size.width.0 as u32 * bytes_per_pixel as u32),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: upload.bounds.size.width.0 as u32,
-                    height: upload.bounds.size.height.0 as u32,
-                    depth_or_array_layers: 1,
-                },
-            );
+                    &upload.data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(
+                            upload.bounds.size.width.0 as u32 * bytes_per_pixel as u32,
+                        ),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: upload.bounds.size.width.0 as u32,
+                        height: upload.bounds.size.height.0 as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
         }
     }
 }
@@ -348,12 +474,17 @@ struct WgpuAtlasTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,
+    mip_level_count: u32,
     live_atlas_keys: u32,
 }
 
 impl WgpuAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        let alloc_size = match self.id.kind {
+            AtlasTextureKind::Monochrome => monochrome_padded_size(size),
+            AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => size,
+        };
+        let allocation = self.allocator.allocate(device_size_to_etagere(alloc_size))?;
         let tile = AtlasTile {
             texture_id: self.id,
             tile_id: allocation.id.into(),

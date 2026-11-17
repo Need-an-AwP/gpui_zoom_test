@@ -21,7 +21,7 @@ pub fn run() {
             return;
         }
         init(cx);
-        cx.set_text_rendering_mode(TextRenderingMode::Grayscale); // only monochrome text
+        cx.set_text_rendering_mode(TextRenderingMode::Grayscale); // only render monochrome text, disable subpixel in atlas
         #[cfg(target_family = "wasm")]
         apply_web_theme_fonts(cx);
 
@@ -102,9 +102,15 @@ fn load_fonts(cx: &App) -> bool {
     use std::borrow::Cow;
 
     let fonts = [
-        Cow::Borrowed(include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-Regular.ttf").as_slice()),
-        Cow::Borrowed(include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-Italic.ttf").as_slice()),
-        Cow::Borrowed(include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-SemiBold.ttf").as_slice()),
+        Cow::Borrowed(
+            include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-Regular.ttf").as_slice(),
+        ),
+        Cow::Borrowed(
+            include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-Italic.ttf").as_slice(),
+        ),
+        Cow::Borrowed(
+            include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-SemiBold.ttf").as_slice(),
+        ),
         Cow::Borrowed(
             include_bytes!("../web/fonts/Noto_Sans/static/NotoSans-SemiBoldItalic.ttf").as_slice(),
         ),
