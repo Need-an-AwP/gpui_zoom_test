@@ -850,9 +850,54 @@ pub struct Hitbox {
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+    /// Scaled-paint transforms (outermost first) active when the hitbox was inserted. `bounds`
+    /// and `content_mask` live in the local (unscaled) space of these transforms, so window-space
+    /// pointer positions are mapped through them before hit testing.
+    pub(crate) transform: Option<Rc<[(Point<Pixels>, f32, Point<Pixels>)]>>,
+}
+
+/// Maps a window-space point into the local space of nested scaled-paint transforms
+/// (outermost first), inverting `p -> pivot + (p - pivot) * scale + pan` for each.
+pub(crate) fn map_to_scaled_local(
+    transform: &[(Point<Pixels>, f32, Point<Pixels>)],
+    mut position: Point<Pixels>,
+) -> Point<Pixels> {
+    for (pivot, scale, pan) in transform {
+        let inv = 1.0 / *scale;
+        position = point(
+            pivot.x + (position.x - pan.x - pivot.x) * inv,
+            pivot.y + (position.y - pan.y - pivot.y) * inv,
+        );
+    }
+    position
 }
 
 impl Hitbox {
+    /// Converts a window-space position into this hitbox's local coordinate space.
+    ///
+    /// Hitboxes inserted inside a scaled subtree (see [`Window::with_scaled_paint`]) keep their
+    /// `bounds` in the subtree's unscaled space; use this to compare window-level pointer
+    /// positions against them. Returns `position` unchanged outside scaled subtrees.
+    pub fn window_to_local(&self, position: Point<Pixels>) -> Point<Pixels> {
+        match &self.transform {
+            Some(transform) => map_to_scaled_local(transform, position),
+            None => position,
+        }
+    }
+
+    /// Converts a position in this hitbox's local coordinate space into window space.
+    /// The inverse of [`Hitbox::window_to_local`].
+    pub fn local_to_window(&self, position: Point<Pixels>) -> Point<Pixels> {
+        match &self.transform {
+            Some(transform) => transform.iter().rev().fold(position, |p, (pivot, scale, pan)| {
+                point(
+                    pivot.x + (p.x - pivot.x) * *scale + pan.x,
+                    pivot.y + (p.y - pivot.y) * *scale + pan.y,
+                )
+            }),
+            None => position,
+        }
+    }
     /// Checks if the hitbox is currently hovered. Returns `false` during keyboard input modality
     /// so that keyboard navigation suppresses hover highlights. Except when handling
     /// `ScrollEvent`, this is typically what you want when determining whether to handle mouse
@@ -1053,6 +1098,9 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    /// Scaled-paint transform for each [`mouse_listeners`] entry (updated on cache reuse).
+    pub(crate) mouse_listener_transforms:
+        Vec<Option<Rc<[(Point<Pixels>, f32, Point<Pixels>)]>>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1109,6 +1157,7 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
+            mouse_listener_transforms: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1136,6 +1185,7 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
+        self.mouse_listener_transforms.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -1180,7 +1230,11 @@ impl Frame {
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
-            if bounds.contains(&position) {
+            let local_position = match &hitbox.transform {
+                Some(transform) => map_to_scaled_local(transform, position),
+                None => position,
+            };
+            if bounds.contains(&local_position) {
                 hit_test.ids.push(hitbox.id);
                 if !set_hover_hitbox_count
                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
@@ -1254,6 +1308,9 @@ pub struct Window {
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
+    /// Active scaled-paint transforms `(pivot, scale, pan)`, outermost first. See
+    /// [`Window::with_scaled_content_mask`].
+    pub(crate) scaled_transform_stack: Vec<(Point<Pixels>, f32, Point<Pixels>)>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
     /// window, so that only actual changes are forwarded (reconfiguring a live
@@ -2412,6 +2469,7 @@ impl Window {
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
+            scaled_transform_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
             last_text_input_configuration: None,
@@ -3522,6 +3580,115 @@ impl Window {
         }
     }
 
+    /// Pushes `mask` onto the content-mask stack without intersecting the current mask.
+    #[inline]
+    pub fn with_unclipped_content_mask<R>(
+        &mut self,
+        mask: ContentMask<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        self.content_mask_stack.push(mask);
+        let result = f(self);
+        self.content_mask_stack.pop();
+        result
+    }
+
+    /// Pushes a scaled-paint transform for hitboxes and mouse listeners; does not change the content mask.
+    #[inline]
+    pub fn with_canvas_transform<R>(
+        &mut self,
+        pivot: Point<Pixels>,
+        scale: f32,
+        pan: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        self.scaled_transform_stack.push((pivot, scale, pan));
+        let ret = f(self);
+        self.scaled_transform_stack.pop();
+        ret
+    }
+
+    /// Runs `f` with the active content mask expanded by `1/scale` around `pivot`.
+    ///
+    /// Use this around the prepaint of a subtree that will later be painted with
+    /// [`Window::with_scaled_paint`], so visibility culling in prepaint uses the same
+    /// (unscaled) coordinate space as the subtree and does not cull its right/bottom parts.
+    pub fn with_scaled_content_mask<R>(
+        &mut self,
+        pivot: Point<Pixels>,
+        scale: f32,
+        pan: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if scale <= f32::EPSILON || ((scale - 1.0).abs() <= f32::EPSILON && pan.is_zero()) {
+            return self.with_canvas_transform(pivot, scale, pan, f);
+        }
+        let inv = 1.0 / scale;
+        let current = self.content_mask().bounds;
+        let expanded = ContentMask {
+            bounds: Bounds::new(
+                point(
+                    pivot.x + (current.origin.x - pan.x - pivot.x) * inv,
+                    pivot.y + (current.origin.y - pan.y - pivot.y) * inv,
+                ),
+                size(current.size.width * inv, current.size.height * inv),
+            ),
+        };
+
+        // Push directly. `with_content_mask` intersects with the current mask and
+        // would clamp this expansion back down to the viewport.
+        self.content_mask_stack.push(expanded);
+        let ret = self.with_canvas_transform(pivot, scale, pan, f);
+        self.content_mask_stack.pop();
+        ret
+    }
+
+    /// The scaled-paint transforms currently active, outermost first, if any.
+    fn current_scaled_transform(&self) -> Option<Rc<[(Point<Pixels>, f32, Point<Pixels>)]>> {
+        if self.scaled_transform_stack.is_empty() {
+            None
+        } else {
+            Some(Rc::from(self.scaled_transform_stack.as_slice()))
+        }
+    }
+
+    /// Runs `f` during paint, then scales primitives recorded since the start around `pivot` by `scale` and translates by `pan`.
+    ///
+    /// `content_mask` is a window-space clip (the viewport, intersected with ancestor overflow).
+    /// [`Scene::scale_since`] scales those masks with the geometry, so the active mask is expanded
+    /// by `1/scale` around the same pivot first. After scaling, window-space clips land back where
+    /// they were, and overflow clips created inside `f` still shrink with the subtree.
+    #[inline]
+    pub fn with_scaled_paint<R>(
+        &mut self,
+        pivot: Point<Pixels>,
+        scale: f32,
+        pan: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        let cp = self.next_frame.scene.checkpoint();
+        let t0 = Instant::now();
+        let ret = self.with_canvas_transform(pivot, scale, pan, f);
+        let t_inner = t0.elapsed();
+        let scaled_pivot = pivot.scale(self.scale_factor());
+        let scaled_pan = pan.scale(self.scale_factor());
+        let t1 = Instant::now();
+        self.next_frame.scene.scale_since(cp, scaled_pivot, scale, scaled_pan);
+        let t_scale = t1.elapsed();
+        println!(
+            "[PERF] with_scaled_paint: inner(replay)={:?}, scale_since={:?}, quads={}, mono={}, subpx={}",
+            t_inner,
+            t_scale,
+            self.next_frame.scene.quads.len() - cp.quads,
+            self.next_frame.scene.monochrome_sprites.len() - cp.monochrome_sprites,
+            self.next_frame.scene.subpixel_sprites.len() - cp.subpixel_sprites
+        );
+        ret
+    }
+
     /// The line height associated with the current text style.
     pub fn line_height(&self) -> Pixels {
         self.text_style().line_height_in_pixels(self.rem_size())
@@ -3718,8 +3885,23 @@ impl Window {
     }
 
     /// The position of the mouse relative to the window.
+    ///
+    /// Inside a scaled subtree (see [`Window::with_scaled_paint`]) this is the position in the
+    /// subtree's local, unscaled coordinate space, matching element bounds and hitboxes.
     pub fn mouse_position(&self) -> Point<Pixels> {
+        map_to_scaled_local(&self.scaled_transform_stack, self.mouse_position)
+    }
+
+    /// The mouse position in window space, ignoring any active scaled-paint transforms.
+    pub fn window_mouse_position(&self) -> Point<Pixels> {
         self.mouse_position
+    }
+
+    /// Converts an offset measured in the current scaled subtree's local space into window space.
+    pub fn local_offset_to_window(&self, offset: Point<Pixels>) -> Point<Pixels> {
+        self.scaled_transform_stack
+            .iter()
+            .fold(offset, |offset, (_, scale, _)| offset * *scale)
     }
 
     /// Captures the pointer for the given hitbox. While captured, all mouse move and mouse up
@@ -4089,7 +4271,7 @@ impl Window {
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
             let mut element = active_drag.view.clone().into_any_element();
-            let offset = self.mouse_position() - active_drag.cursor_offset;
+            let offset = self.mouse_position - active_drag.cursor_offset;
             element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
             active_drag_element = Some(element);
             cx.active_drag = Some(active_drag);
@@ -4367,10 +4549,15 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        let current_transform = self.current_scaled_transform();
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
-                .cloned(),
+                .map(|hitbox| {
+                    let mut hitbox = hitbox.clone();
+                    hitbox.transform = current_transform.clone();
+                    hitbox
+                }),
         );
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
@@ -4453,12 +4640,20 @@ impl Window {
                 .iter_mut()
                 .map(|handler| handler.take()),
         );
+        let current_transform = self.current_scaled_transform();
+        self.next_frame.mouse_listener_transforms.extend(
+            self.rendered_frame.mouse_listener_transforms
+                [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+                .iter()
+                .map(|_| current_transform.clone()),
+        );
         self.next_frame.mouse_listeners.extend(
             self.rendered_frame.mouse_listeners
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
+
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
                 ..range.end.accessed_element_states_index]
@@ -5743,6 +5938,7 @@ impl Window {
             bounds,
             content_mask,
             behavior,
+            transform: self.current_scaled_transform(),
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         hitbox
@@ -5897,11 +6093,37 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
+        let listener_index = self.next_frame.mouse_listeners.len();
+        self.next_frame
+            .mouse_listener_transforms
+            .push(self.current_scaled_transform());
         self.next_frame.mouse_listeners.push(Some(Box::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
-                if let Some(event) = event.downcast_ref() {
-                    listener(event, phase, window, cx)
+                let Some(event) = event.downcast_ref::<Event>() else {
+                    return;
+                };
+                // Inside a scaled subtree, hand the listener pointer coordinates in the
+                // subtree's local (unscaled) space, matching its hitbox and layout bounds.
+                let transform = window
+                    .rendered_frame
+                    .mouse_listener_transforms
+                    .get(listener_index)
+                    .and_then(|t| t.clone());
+                if let Some(transform) = &transform {
+                    let map = |p| map_to_scaled_local(transform, p);
+                    if let Some(local_event) = event.with_mapped_position(&map) {
+                        // `Window::mouse_position` maps through the transform stack, so push
+                        // this listener's transforms for the duration of the call.
+                        let saved = mem::replace(
+                            &mut window.scaled_transform_stack,
+                            transform.to_vec(),
+                        );
+                        listener(&local_event, phase, window, cx);
+                        window.scaled_transform_stack = saved;
+                        return;
+                    }
                 }
+                listener(event, phase, window, cx)
             },
         )));
     }
@@ -6401,7 +6623,7 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {

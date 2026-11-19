@@ -352,6 +352,123 @@ pub fn quad_depth(quad_id: u32, scale: f32) -> f32 {
     ((quad_id + 1) as f32 * scale).min(1.0)
 }
 
+/// Records primitive vector lengths before painting a subtree, for post-paint scaling.
+#[derive(Clone, Copy, Debug, Default)]
+#[expect(missing_docs)]
+pub struct SceneCheckpoint {
+    pub shadows: usize,
+    pub quads: usize,
+    pub paths: usize,
+    pub underlines: usize,
+    pub monochrome_sprites: usize,
+    pub subpixel_sprites: usize,
+    pub polychrome_sprites: usize,
+    pub surfaces: usize,
+}
+
+#[inline]
+fn scale_point(
+    p: Point<ScaledPixels>,
+    pivot: Point<ScaledPixels>,
+    k: f32,
+    offset: Point<ScaledPixels>,
+) -> Point<ScaledPixels> {
+    Point {
+        x: ScaledPixels(pivot.x.0 + (p.x.0 - pivot.x.0) * k + offset.x.0),
+        y: ScaledPixels(pivot.y.0 + (p.y.0 - pivot.y.0) * k + offset.y.0),
+    }
+}
+
+#[inline]
+fn scale_bounds(
+    b: Bounds<ScaledPixels>,
+    pivot: Point<ScaledPixels>,
+    k: f32,
+    offset: Point<ScaledPixels>,
+) -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: scale_point(b.origin, pivot, k, offset),
+        size: Size {
+            width: ScaledPixels(b.size.width.0 * k),
+            height: ScaledPixels(b.size.height.0 * k),
+        },
+    }
+}
+
+#[expect(missing_docs)]
+impl Scene {
+    pub fn checkpoint(&self) -> SceneCheckpoint {
+        SceneCheckpoint {
+            shadows: self.shadows.len(),
+            quads: self.quads.len(),
+            paths: self.paths.len(),
+            underlines: self.underlines.len(),
+            monochrome_sprites: self.monochrome_sprites.len(),
+            subpixel_sprites: self.subpixel_sprites.len(),
+            polychrome_sprites: self.polychrome_sprites.len(),
+            surfaces: self.surfaces.len(),
+        }
+    }
+
+    /// Scales all primitives appended after `cp`, around `pivot`, by factor `k`, and translates by `offset`.
+    pub fn scale_since(
+        &mut self,
+        cp: SceneCheckpoint,
+        pivot: Point<ScaledPixels>,
+        k: f32,
+        offset: Point<ScaledPixels>,
+    ) {
+        if (k - 1.0).abs() <= f32::EPSILON
+            && offset.x.0.abs() <= f32::EPSILON
+            && offset.y.0.abs() <= f32::EPSILON
+        {
+            return;
+        }
+        for q in &mut self.quads[cp.quads..] {
+            q.bounds = scale_bounds(q.bounds, pivot, k, offset);
+            q.content_mask.bounds = scale_bounds(q.content_mask.bounds, pivot, k, offset);
+            q.corner_radii = q.corner_radii.map(|r| ScaledPixels(r.0 * k));
+            q.border_widths = q.border_widths.map(|w| ScaledPixels(w.0 * k));
+        }
+        for s in &mut self.shadows[cp.shadows..] {
+            s.bounds = scale_bounds(s.bounds, pivot, k, offset);
+            s.content_mask.bounds = scale_bounds(s.content_mask.bounds, pivot, k, offset);
+            s.corner_radii = s.corner_radii.map(|r| ScaledPixels(r.0 * k));
+            s.shape_bounds = scale_bounds(s.shape_bounds, pivot, k, offset);
+            s.shape_corner_radii = s.shape_corner_radii.map(|r| ScaledPixels(r.0 * k));
+            s.blur_radius = ScaledPixels(s.blur_radius.0 * k);
+        }
+        for m in &mut self.monochrome_sprites[cp.monochrome_sprites..] {
+            m.bounds = scale_bounds(m.bounds, pivot, k, offset);
+            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k, offset);
+        }
+        for m in &mut self.subpixel_sprites[cp.subpixel_sprites..] {
+            m.bounds = scale_bounds(m.bounds, pivot, k, offset);
+            m.content_mask.bounds = scale_bounds(m.content_mask.bounds, pivot, k, offset);
+        }
+        for p in &mut self.polychrome_sprites[cp.polychrome_sprites..] {
+            p.bounds = scale_bounds(p.bounds, pivot, k, offset);
+            p.content_mask.bounds = scale_bounds(p.content_mask.bounds, pivot, k, offset);
+            p.corner_radii = p.corner_radii.map(|r| ScaledPixels(r.0 * k));
+        }
+        for u in &mut self.underlines[cp.underlines..] {
+            u.bounds = scale_bounds(u.bounds, pivot, k, offset);
+            u.content_mask.bounds = scale_bounds(u.content_mask.bounds, pivot, k, offset);
+            u.thickness = ScaledPixels(u.thickness.0 * k);
+        }
+        for path in &mut self.paths[cp.paths..] {
+            path.bounds = scale_bounds(path.bounds, pivot, k, offset);
+            path.paint.bounds = scale_bounds(path.paint.bounds, pivot, k, offset);
+            path.paint.content_mask.bounds =
+                scale_bounds(path.paint.content_mask.bounds, pivot, k, offset);
+            Rc::make_mut(&mut path.tiles).scale_and_offset(pivot, k, offset);
+        }
+        for surface in &mut self.surfaces[cp.surfaces..] {
+            surface.bounds = scale_bounds(surface.bounds, pivot, k, offset);
+            surface.content_mask.bounds = scale_bounds(surface.content_mask.bounds, pivot, k, offset);
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Default)]
 #[cfg_attr(
     all(

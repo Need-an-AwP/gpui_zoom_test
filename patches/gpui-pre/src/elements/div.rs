@@ -3107,7 +3107,7 @@ impl Interactivity {
                             cx.active_drag = Some(AnyDrag {
                                 view: drag,
                                 value: listener.value,
-                                cursor_offset,
+                                cursor_offset: window.local_offset_to_window(cursor_offset),
                                 cursor_style: drag_cursor_style,
                                 external_payload_source,
                             });
@@ -4030,7 +4030,7 @@ fn show_tooltip(
         ActiveTooltip::Visible {
             tooltip: AnyTooltip {
                 view,
-                mouse_position: window.mouse_position(),
+                mouse_position: window.window_mouse_position(),
                 check_visible_and_update: Rc::new(move |tooltip_bounds, window, cx| {
                     if long_press_tooltip_active
                         .as_ref()

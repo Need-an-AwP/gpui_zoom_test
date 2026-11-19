@@ -2721,6 +2721,13 @@ impl WindowSelectionState {
                 *stalled = 0;
             }
             let window = window;
+            // `position` is in the participant's local space; the synthetic wheel event is
+            // dispatched through the window, which expects window space.
+            let position = state
+                .anchor_registration()
+                .map_or(position, |(_, registration)| {
+                    registration.hitbox.local_to_window(position)
+                });
             cx.defer(move |cx| {
                 _ = window.update(cx, |_, window, cx| {
                     window.dispatch_event(
@@ -2826,6 +2833,31 @@ impl WindowSelectionState {
         self.participants
             .get_mut()
             .retain(|_, registration| registration.participant.upgrade().is_some());
+    }
+
+    /// Converts a window-space pointer position into the local coordinate space the participants'
+    /// geometry was registered in. Participants inside a scaled subtree (see
+    /// `Window::with_scaled_paint`) register unscaled geometry, while this window-level layer
+    /// receives window-space events. The transform of the anchor participant is used while
+    /// selecting, otherwise that of the hovered (or else any) participant.
+    fn local_position(&self, position: Point<Pixels>, window: &Window) -> Point<Pixels> {
+        if self.is_selecting
+            && let Some((_, registration)) = self.anchor_registration()
+        {
+            return registration.hitbox.window_to_local(position);
+        }
+        let participants = self.participants.borrow();
+        let mut candidates = participants
+            .values()
+            .filter(|registration| registration.registration.scope == self.active_scope);
+        let chosen = candidates.clone().find(|registration| {
+            registration.registration.hitbox.is_hovered(window)
+        });
+        chosen
+            .or_else(|| candidates.next())
+            .map_or(position, |registration| {
+                registration.registration.hitbox.window_to_local(position)
+            })
     }
 }
 
@@ -3398,7 +3430,8 @@ fn schedule_selection_frame(
                 state.update(cx, |state, cx| {
                     // A handle drag holds the finger off the text; keep the
                     // same offset, or the cursor would hop between the two.
-                    let position = window.mouse_position();
+                    let position = window.window_mouse_position();
+                    let position = state.local_position(position, window);
                     let position = state
                         .touch
                         .drag
@@ -3455,7 +3488,8 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
             }
             state.update(cx, |state, cx| {
                 if !state.is_selecting {
-                    state.begin_in_window(event.position, event.modifiers.shift, window, cx)
+                    let position = state.local_position(event.position, window);
+                    state.begin_in_window(position, event.modifiers.shift, window, cx)
                 }
             });
             WindowSelectionState::resolve_content_keys(&state, cx);
@@ -3465,7 +3499,8 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
             }
             let touch = GlobalState::is_touch_press(cx);
             state.update(cx, |state, cx| {
-                let unit = state.select_at(event.position, event.click_count, window, cx);
+                let position = state.local_position(event.position, window);
+                let unit = state.select_at(position, event.click_count, window, cx);
                 // A double tap is touch's other way to select a word, and it
                 // gets the handles and the menu like a long press does.
                 if touch {
@@ -3606,7 +3641,8 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
                 if state.touch.drag.is_some() {
                     return;
                 }
-                state.update_in_window(event.position, window, cx)
+                let position = state.local_position(event.position, window);
+                state.update_in_window(position, window, cx)
             });
             WindowSelectionState::resolve_content_keys(&state, cx);
         }
@@ -3651,8 +3687,9 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         }
         // A scroll only moves a selection being made under the pointer.
         if phase.bubble() && state.read(cx).is_selecting {
-            let position = window.mouse_position();
+            let position = window.window_mouse_position();
             state.update(cx, |state, cx| {
+                let position = state.local_position(position, window);
                 // A handle drag holds the finger off the text; keep its offset.
                 let position = state
                     .touch

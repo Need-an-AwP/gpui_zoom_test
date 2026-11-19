@@ -59,7 +59,7 @@ impl FastFloat for f32 {
 }
 
 /// A path's curves binned into tiles for one display scale.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct PathTiles {
     bounds: Bounds<ScaledPixels>,
     tiles: Vec<PathTile>,
@@ -95,6 +95,42 @@ impl PathTiles {
                 && tile.bottom_right.x > mask.origin.x.0
                 && tile.bottom_right.y > mask.origin.y.0
         });
+    }
+
+    /// Scales all tile and curve coordinates around `pivot` by `k` and translates by `offset`.
+    pub(crate) fn scale_and_offset(
+        &mut self,
+        pivot: Point<ScaledPixels>,
+        k: f32,
+        offset: Point<ScaledPixels>,
+    ) {
+        let map_f32 = |p: Point<f32>| {
+            point(
+                pivot.x.0 + (p.x - pivot.x.0) * k + offset.x.0,
+                pivot.y.0 + (p.y - pivot.y.0) * k + offset.y.0,
+            )
+        };
+        let origin = map_f32(point(self.bounds.origin.x.0, self.bounds.origin.y.0));
+        self.bounds = Bounds {
+            origin: point(ScaledPixels(origin.x), ScaledPixels(origin.y)),
+            size: crate::Size {
+                width: ScaledPixels(self.bounds.size.width.0 * k),
+                height: ScaledPixels(self.bounds.size.height.0 * k),
+            },
+        };
+        for tile in &mut self.tiles {
+            tile.top_left = map_f32(tile.top_left);
+            tile.bottom_right = map_f32(tile.bottom_right);
+            tile.reference = map_f32(tile.reference);
+            tile.curves_top_left = map_f32(tile.curves_top_left);
+            tile.curves_bottom_right = map_f32(tile.curves_bottom_right);
+        }
+        for curve in &mut self.curves {
+            curve.p0 = map_f32(curve.p0);
+            curve.p1 = map_f32(curve.p1);
+            curve.a = point(curve.a.x * k, curve.a.y * k);
+            curve.b = point(curve.b.x * k, curve.b.y * k);
+        }
     }
 }
 
