@@ -1194,6 +1194,9 @@ impl WgpuRendererCore {
             label: Some("atlas_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 3.0,
             ..Default::default()
         });
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
@@ -1268,6 +1271,17 @@ impl WgpuRendererCore {
             ],
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
+        log::info!(
+            "WgpuRendererCore initialized: target_format={target_format:?}, alpha_mode={alpha_mode:?}, \
+             dual_source_blending={dual_source_blending}, subpixel_pipeline={}, \
+             uses_webgl_instance_data={uses_webgl_instance_data}, \
+             subpixel_enhanced_contrast={}, grayscale_enhanced_contrast={}, \
+             max_texture_size={max_texture_size}, max_instance_data_size={max_instance_data_size}, \
+             atlas_sampler=(mag=Linear, min=Linear, mipmap=Linear, lod=0.0..3.0)",
+            pipelines.subpixel_sprites.is_some(),
+            rendering_params.subpixel_enhanced_contrast,
+            rendering_params.grayscale_enhanced_contrast,
+        );
 
         Self {
             resources: WgpuResources {

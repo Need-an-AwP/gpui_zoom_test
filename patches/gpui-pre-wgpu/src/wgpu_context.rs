@@ -415,11 +415,22 @@ impl WgpuContext {
         let (device, queue, dual_source_blending, color_texture_format) =
             Self::create_device(&adapter).await?;
         let errors = DeviceErrorState::install(&device);
+        let adapter_features = adapter.features();
+        let device_features = device.features();
+        let device_limits = device.limits();
         log::info!(
             "Browser graphics initialized: requested={preference:?}, selected={backend:?}, \
-             adapter={:?}, limits={:?}, dual_source_blending={dual_source_blending}",
+             adapter={:?}, device_type={:?}, driver={:?}, driver_info={:?}, \
+             color_texture_format={color_texture_format:?}, dual_source_blending={dual_source_blending}, \
+             adapter_features={adapter_features:?}, device_features={device_features:?}, \
+             max_texture_dimension_2d={}, max_buffer_size={}, max_storage_buffer_binding_size={}",
             adapter_info.name,
-            device.limits(),
+            adapter_info.device_type,
+            adapter_info.driver,
+            adapter_info.driver_info,
+            device_limits.max_texture_dimension_2d,
+            device_limits.max_buffer_size,
+            device_limits.max_storage_buffer_binding_size,
         );
 
         let context = Self {
@@ -432,6 +443,11 @@ impl WgpuContext {
             color_texture_format,
             errors,
         };
+        log::info!(
+            "WgpuContext capabilities: uses_webgl_instance_data={}, supports_dual_source_blending={}",
+            context.uses_webgl_instance_data(),
+            context.supports_dual_source_blending(),
+        );
         Ok(PreparedWebGraphics { context, surface })
     }
 
