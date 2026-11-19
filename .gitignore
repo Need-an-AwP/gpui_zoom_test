@@ -3,3 +3,4 @@ node_modules
 
 /patches/gpui-pre/target
 /patches/gpui-base/target
+/xtask/target
