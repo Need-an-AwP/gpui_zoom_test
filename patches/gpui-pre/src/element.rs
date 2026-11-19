@@ -946,7 +946,7 @@ mod global_element_id_tests {
             let frame = |cx: &mut crate::TestAppContext| {
                 cx.update_window(window, |_, window, cx| {
                     window.refresh();
-                    let started = std::time::Instant::now();
+                    let started = scheduler::Instant::now();
                     window.draw(cx).clear(cx);
                     started.elapsed()
                 })
@@ -975,17 +975,17 @@ mod global_element_id_tests {
         let id = GlobalElementId::new(&ids);
         let n = 1_000_000u64;
         let mut acc = 0u64;
-        let started = std::time::Instant::now();
+        let started = scheduler::Instant::now();
         for _ in 0..n {
             acc ^= fx_hash(&std::hint::black_box(ids.as_slice()));
         }
         let walk = started.elapsed();
-        let started = std::time::Instant::now();
+        let started = scheduler::Instant::now();
         for _ in 0..n {
             acc ^= fx_hash(std::hint::black_box(&id));
         }
         let cached = started.elapsed();
-        let started = std::time::Instant::now();
+        let started = scheduler::Instant::now();
         for _ in 0..n {
             acc ^= GlobalElementId::new(std::hint::black_box(&ids)).hash;
         }
