@@ -18,13 +18,14 @@ use crate::{
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style, SubpixelSprite, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextInputConfiguration,
-    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams,
-    WindowTextSystem, WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, SceneCheckpoint, Shadow,
+    SharedString, Size, SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style,
+    SubpixelSprite, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
+    prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -1132,7 +1133,8 @@ pub(crate) struct PrepaintStateIndex {
 
 #[derive(Clone, Default)]
 pub(crate) struct PaintIndex {
-    scene_index: usize,
+    primitives: SceneCheckpoint,
+    layers: usize,
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
@@ -2798,11 +2800,10 @@ impl Window {
             return;
         }
 
-        if self.focus.is_some() {
+        if self.focus.take().is_some() {
             self.focus_generation = self.focus_generation.wrapping_add(1);
+            self.refresh();
         }
-        self.focus = None;
-        self.refresh();
     }
 
     /// Blur the window and don't allow anything in it to be focused again.
@@ -3610,6 +3611,29 @@ impl Window {
         ret
     }
 
+    /// Whether cached [`crate::View`] prepaint will be skipped for this draw because the window
+    /// was scheduled for a full redraw (see [`Window::refresh`]).
+    pub fn view_cache_refreshing(&self) -> bool {
+        self.refreshing
+    }
+
+    /// Runs `f` with [`Self::view_cache_refreshing`] overridden, restoring the previous value
+    /// afterward.
+    ///
+    /// Cached entity views consult this flag during prepaint. Clearing it for a subtree allows
+    /// cache reuse even when the window was scheduled for a full redraw.
+    #[inline]
+    pub fn with_view_cache_refreshing<R>(
+        &mut self,
+        refreshing: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.refreshing, refreshing);
+        let ret = f(self);
+        self.refreshing = previous;
+        ret
+    }
+
     /// Runs `f` with the active content mask expanded by `1/scale` around `pivot`.
     ///
     /// Use this around the prepaint of a subtree that will later be painted with
@@ -4000,8 +4024,12 @@ impl Window {
                 self.rendered_frame.input_handlers.push(Some(input_handler));
             }
         }
+        let t_start = Instant::now();
+        let mut t_draw_roots = std::time::Duration::ZERO;
         if !cx.mode.skip_drawing() {
+            let t0 = Instant::now();
             self.draw_roots(cx);
+            t_draw_roots = t0.elapsed();
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -4047,7 +4075,9 @@ impl Window {
 
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
+        let t_finish_start = Instant::now();
         self.next_frame.finish(&mut self.rendered_frame);
+        let t_finish = t_finish_start.elapsed();
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -4117,6 +4147,11 @@ impl Window {
             self.debug_frame_overlay.record_frame(draw_duration);
         }
 
+        let t_total = t_start.elapsed();
+        println!(
+            "[PERF] Window::draw total={:?} (roots={:?}, finish={:?})",
+            t_total, t_draw_roots, t_finish
+        );
         // Exit the scope to obtain the arena-clear token this draw owes; the
         // scope's teardown itself happens in `ElementArenaScope::drop`.
         arena_scope.exit(&cx.element_arena)
@@ -4148,7 +4183,10 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
+        let t0 = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        let t_draw = t0.elapsed();
+        // println!("[PERF] present(DirectX)={:?}", t_draw);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -4607,7 +4645,8 @@ impl Window {
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
-            scene_index: self.next_frame.scene.len(),
+            primitives: self.next_frame.scene.replay_checkpoint(),
+            layers: self.next_frame.scene.replay_layer_len(),
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
@@ -4620,6 +4659,7 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        let t0 = Instant::now();
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4640,6 +4680,8 @@ impl Window {
                 .iter_mut()
                 .map(|handler| handler.take()),
         );
+        let t_listeners_start = Instant::now();
+        let mouse_count = range.end.mouse_listeners_index - range.start.mouse_listeners_index;
         let current_transform = self.current_scaled_transform();
         self.next_frame.mouse_listener_transforms.extend(
             self.rendered_frame.mouse_listener_transforms
@@ -4653,6 +4695,7 @@ impl Window {
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
+        let t_listeners = t_listeners_start.elapsed();
 
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
@@ -4665,12 +4708,27 @@ impl Window {
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
 
+        let t_text_start = Instant::now();
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
-            range.start.scene_index..range.end.scene_index,
+        let t_text = t_text_start.elapsed();
+
+        let t_scene_start = Instant::now();
+        self.next_frame.scene.replay_cached(
             &self.rendered_frame.scene,
+            range.start.primitives..range.end.primitives,
+            range.start.layers..range.end.layers,
         );
+        let t_scene = t_scene_start.elapsed();
+
+        // println!(
+        //     "  [REUSE_PAINT] total={:?}, listeners({} items)={:?}, text_layouts={:?}, scene_replay={:?}",
+        //     t0.elapsed(),
+        //     mouse_count,
+        //     t_listeners,
+        //     t_text,
+        //     t_scene
+        // );
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
